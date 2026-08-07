@@ -27,7 +27,7 @@ def _load_system_prompt_template() -> str:
     return """你是 LearnLove Agent — 用户的微信聊天助手。
 
 你的任务是帮助用户自然、得体地进行微信聊天。你分析对话上下文，
-理解对方的情绪和意图，然后给出 1-3 条可选的回复建议。
+理解对方的情绪和意图，然后给出合适的回复建议。
 
 {contact_context}
 {skill_context}
@@ -37,8 +37,8 @@ def _load_system_prompt_template() -> str:
 
 ## 回复生成原则
 - **像用户本人说话**：参考用户风格分析，用类似的句式、语气、表情习惯
-- 短小自然：每条建议不超过 200 字，像真人聊天
-- 提供选择：标注每条建议的风格差异
+- 短句自然：用短句，不同方向换行分开，像真人聊天
+- 批量处理：多条新消息一起看，给一条回复，不逐条分析
 - 先共情再建议：理解对方情绪后再给回复方案
 - 注意节奏：不要在对方情绪激动时立刻给建议"""
 
@@ -136,6 +136,7 @@ class ContextBuilder:
 
     def build_context(self, contact_name: str, contact_wxid: str,
                       new_message: dict | None = None,
+                      new_messages: list[dict] | None = None,
                       recent_history: list[dict] = None,
                       memory_text: str = "",
                       skill_modifiers: str = "",
@@ -145,8 +146,9 @@ class ContextBuilder:
         Args:
             contact_name: 联系人显示名
             contact_wxid: 联系人 wxid
-            new_message: 新来的消息 {"sender": str, "content": str, "time": str}
-            recent_history: 最近的对话历史
+            new_message: (deprecated) 单条新消息，建议用 new_messages
+            new_messages: 批量新消息列表，每条 {"sender": str, "content": str, "time": str}
+            recent_history: 最近的对话历史（作为参考背景）
             memory_text: 长期记忆内容
             skill_modifiers: 活跃技能的 prompt_modifier 拼接
             max_tokens: token 预算上限
@@ -161,18 +163,34 @@ class ContextBuilder:
             skill_modifiers=skill_modifiers,
         )
 
-        # Layer 5: 近期聊天历史
+        # Layer 5: 近期聊天历史（参考背景）
         if recent_history:
             history_text = self._format_history(recent_history, max_tokens)
             if history_text:
                 messages.append({
                     "role": "system",
-                    "content": f"## 近期对话记录\n{history_text}",
+                    "content": f"## 之前的对话（参考背景）\n{history_text}",
                 })
 
-        # Layer 6: 新消息
-        if new_message:
-            user_content = f"[新消息] {new_message['sender']} ({new_message.get('time', '')}): {new_message['content']}"
+        # Layer 6: 新消息 — 支持批量
+        # 兼容旧的 new_message 参数
+        all_new = new_messages or []
+        if new_message and not all_new:
+            all_new = [new_message]
+
+        if all_new:
+            if len(all_new) == 1:
+                m = all_new[0]
+                user_content = (
+                    f"[新消息 — 需要回复]\n"
+                    f"{m['sender']} ({m.get('time', '')}): {m['content']}"
+                )
+            else:
+                lines = [f"[新消息 ×{len(all_new)} — 以下是上次回复后对方发来的消息，一起看，给一条回复]"]
+                for m in all_new:
+                    lines.append(f"[{m.get('time', '')}] {m['sender']}: {m['content']}")
+                user_content = "\n".join(lines)
+
             messages.append({"role": "user", "content": user_content})
 
         return messages

@@ -313,8 +313,13 @@ def run_chat(config: dict):
             # 排空监控队列
             auto_new = _drain_monitor_queue()
 
-            # 处理自动模式的新消息
+            # 处理自动模式的新消息 — 批量处理，一次 LLM 调用
             if auto_new:
+                # === Step 1: 预处理（语音转录、联系人解析） ===
+                processed = []
+                primary_contact_name = contact_name
+                primary_contact_wxid = contact_wxid
+
                 for entry in auto_new:
                     entry_contact = entry.get("sender", "?")
                     entry_content = entry.get("content", "")
@@ -322,12 +327,12 @@ def run_chat(config: dict):
 
                     _print(f"\n  📩 [自动] {entry_contact} ({entry.get('time', '')}): {entry_content[:100]}", style="yellow")
 
-                    # 检查是否是语音消息，根据模式处理
-                    if entry_type == 34:  # 语音
+                    # 语音消息处理
+                    if entry_type == 34:
                         entry_wxid = entry.get("wxid", "")
                         voice_cfg = state.voice_mode(entry_wxid)
                         if voice_cfg == "manual":
-                            _print("  🎤 语音消息 — 手动模式，请描述语音内容或输入 /voice auto 切换", style="yellow")
+                            _print("  🎤 语音消息 — 手动模式，跳过", style="yellow")
                             continue
                         else:
                             _print("  🎤 正在转录语音...", style="dim")
@@ -344,69 +349,114 @@ def run_chat(config: dict):
                                 _print(f"  🎤 转录异常: {e}", style="red")
                                 continue
 
-                    # 确定消息归属的联系人（匹配名称和记忆）
+                    # 确定联系人
                     msg_wxid = entry.get("wxid", "")
                     msg_contact_name = state.contacts.get(msg_wxid, {}).get("display", entry_contact)
 
-                    # 如果当前活跃联系人不是消息发送者，自动切换
-                    if msg_contact_name and msg_contact_name != contact_name:
-                        _print(f"  🔄 自动切换联系人: {contact_name} → {msg_contact_name}", style="dim")
-                        contact_name = msg_contact_name
-                        contact_wxid = msg_wxid
-                        contact_memory = ContactMemory(contact_name, llm_cfg)
-                        contact_memory.startup()
+                    if msg_contact_name and msg_contact_name != primary_contact_name:
+                        if primary_contact_name == contact_name:
+                            # 首次遇到不同联系人，切换
+                            _print(f"  🔄 自动切换联系人: {primary_contact_name} → {msg_contact_name}", style="dim")
+                            primary_contact_name = msg_contact_name
+                            primary_contact_wxid = msg_wxid
+                            contact_name = msg_contact_name
+                            contact_wxid = msg_wxid
+                            contact_memory = ContactMemory(contact_name, llm_cfg)
+                            contact_memory.startup()
 
-                    _print("  ▸ 生成回复建议...", style="dim")
+                    processed.append({
+                        "sender": entry_contact,
+                        "content": entry_content,
+                        "time": entry.get("time", ""),
+                    })
 
-                    # 构建上下文
+                if not processed:
+                    continue
+
+                # === Step 2: 批量构建上下文 + LLM 调用（带「偷跑检测」） ===
+                _print(f"  ▸ 批量处理 {len(processed)} 条新消息...", style="dim")
+
+                reply = None
+                max_retries = 2  # 最多追加两轮，防止对方刷屏死循环
+
+                for retry in range(max_retries + 1):
                     msg_context = ctx_builder.build_context(
                         contact_name=contact_name,
                         contact_wxid=contact_wxid,
-                        new_message={
-                            "sender": entry_contact,
-                            "content": entry_content,
-                            "time": entry.get("time", ""),
-                        },
+                        new_messages=processed,
                         memory_text=contact_memory.memory_text() if contact_memory else "",
                         skill_modifiers=_get_skill_modifiers(),
                         max_tokens=agent_cfg.get("context", {}).get("max_context_tokens", 8000),
                     )
 
-                    # LLM 工具调用循环
                     with _console.status("[cyan]思考中...[/cyan]") if _console else contextlib.nullcontext():
                         reply = _execute_tool_loop(msg_context, llm_cfg, active_skills)
 
-                    if reply and not reply.startswith("[系统]"):
-                        _print(f"\n  🤖 建议回复:", style="bold green")
-                        _print(f"  {reply}", style="green")
-                        last_suggestion = reply
+                    # 检查 LLM 思考期间有没有新消息偷跑进来
+                    late_entries = _drain_monitor_queue()
+                    if not late_entries:
+                        break  # 没有新消息，直接输出
 
-                        # 自动复制到剪贴板
-                        if agent_cfg.get("auto", {}).get("auto_copy", False):
-                            try:
-                                from agent.tools.send import copy_to_clipboard
-                                copy_to_clipboard(reply)
-                                _print("  📋 已复制到剪贴板", style="dim")
-                            except Exception:
-                                pass
+                    # 有新消息！预处理后追加到批次，重新分析
+                    late_processed = []
+                    for entry in late_entries:
+                        entry_contact = entry.get("sender", "?")
+                        entry_content = entry.get("content", "")
+                        entry_type = entry.get("type", 1)
 
-                        # 记录记忆
-                        if contact_memory:
-                            contact_memory.log_turn(
-                                incoming_msg=entry_content,
-                                incoming_sender=entry_contact,
-                                suggested_reply=reply,
+                        # 语音跳过（偷跑消息的语音暂不处理，避免阻塞）
+                        if entry_type == 34:
+                            _print(f"  🎤 [偷跑] 语音消息，跳过转录", style="yellow")
+                            continue
+
+                        _print(f"  ⚡ [偷跑] {entry_contact} ({entry.get('time', '')}): {entry_content[:80]}", style="yellow")
+                        late_processed.append({
+                            "sender": entry_contact,
+                            "content": entry_content,
+                            "time": entry.get("time", ""),
+                        })
+
+                    if late_processed:
+                        processed.extend(late_processed)
+                        _print(f"  🔄 思考中到达 {len(late_processed)} 条，合并重分析（第 {retry + 1} 次）...", style="dim")
+                        continue
+                    else:
+                        break  # 全是语音且跳过了
+
+                if reply and not reply.startswith("[系统]"):
+                    _print(f"\n  🤖 建议回复:", style="bold green")
+                    _print(f"  {reply}", style="green")
+                    last_suggestion = reply
+
+                    # 自动复制到剪贴板
+                    if agent_cfg.get("auto", {}).get("auto_copy", False):
+                        try:
+                            from agent.tools.send import copy_to_clipboard
+                            copy_to_clipboard(reply)
+                            _print("  📋 已复制到剪贴板", style="dim")
+                        except Exception:
+                            pass
+
+                    # 记录记忆（一次性记录所有消息 + 回复）
+                    if contact_memory:
+                        all_incoming = "\n".join(
+                            f"[{m['time']}] {m['sender']}: {m['content']}"
+                            for m in processed
+                        )
+                        contact_memory.log_turn(
+                            incoming_msg=all_incoming,
+                            incoming_sender=primary_contact_name,
+                            suggested_reply=reply,
+                        )
+
+                        if contact_memory.needs_compact(
+                            max_chars=memory_cfg.get("transcript_max_chars", 60000),
+                            max_turns=memory_cfg.get("compact_turns", 30),
+                        ):
+                            _print("  📝 压缩记忆中...", style="dim")
+                            contact_memory.compact(
+                                max_memory_chars=memory_cfg.get("max_memory_chars", 4000),
                             )
-
-                            # 检查是否需要压缩
-                            if contact_memory.needs_compact(
-                                max_chars=memory_cfg.get("transcript_max_chars", 60000),
-                                max_turns=memory_cfg.get("compact_turns", 30),
-                            ):
-                                _print("  📝 压缩记忆中...", style="dim")
-                                contact_memory.compact(
-                                    max_memory_chars=memory_cfg.get("max_memory_chars", 4000),
-                                )
 
                 continue  # 处理完自动新消息后继续循环
 
