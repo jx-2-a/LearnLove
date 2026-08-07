@@ -2,8 +2,8 @@
 快速检查新消息 — 对比上次状态，返回新消息（含语音解码）
 
 用法:
-    python tools/check_new.py --name "秋绒"
-    python tools/check_new.py --name "谢雨欣"
+    python tools/check_new.py --name "联系人名称"
+    python tools/check_new.py --name "联系人名称"
 """
 import os, sys, json, sqlite3, hashlib, re, argparse, tempfile, struct, wave
 from datetime import datetime

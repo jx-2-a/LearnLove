@@ -32,7 +32,7 @@ def warn(msg):
 
 
 def fail(msg):
-    print(f"  [✗] {msg}", flush=True)
+    print(f"  [X] {msg}", flush=True)
 
 
 # ---- 步骤 0: 加载配置 ----
@@ -129,7 +129,8 @@ def extract_keys(cfg):
             if r.returncode == 0 and os.path.exists(keys_file):
                 ok("内存提取成功")
                 return keys_file
-            warn(f"内存提取失败: {r.stderr.strip()[:200] if r.stderr else '未知错误'}")
+            err = (r.stderr.strip() or r.stdout.strip())[:300]
+            warn(f"内存提取失败 (exit={r.returncode}): {err or '未知错误'}")
         except subprocess.TimeoutExpired:
             warn("内存提取超时（微信是否在运行？）")
         except Exception as e:
@@ -152,7 +153,8 @@ def extract_keys(cfg):
                 if r.returncode == 0 and os.path.exists(keys_file):
                     ok("密码派生成功")
                     return keys_file
-                warn(f"密码派生失败: {r.stderr.strip()[:200] if r.stderr else '未知错误'}")
+                err = (r.stderr.strip() or r.stdout.strip())[:300]
+                warn(f"密码派生失败 (exit={r.returncode}): {err or '未知错误'}")
             except Exception as e:
                 warn(f"密码派生异常: {e}")
     else:
@@ -213,12 +215,13 @@ def decrypt_databases(cfg):
 # ---- 辅助 ----
 
 def _resolve_path(p):
-    """展开 ~ 和相对路径"""
+    """展开 ~ 和相对路径（与 config.py 一致：相对路径相对于配置目录）"""
     if not p:
         return ""
     p = os.path.expanduser(p)
     if not os.path.isabs(p):
-        p = os.path.join(HERE, p)
+        from config import CONFIG_DIR
+        p = os.path.join(CONFIG_DIR, p)
     return p
 
 

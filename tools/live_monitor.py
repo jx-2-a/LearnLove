@@ -2,8 +2,8 @@
 实时微信消息监听器 — 监听数据库变化，自动解码文字和语音
 
 用法:
-    python tools/live_monitor.py --name "谢雨欣"
-    python tools/live_monitor.py --name "谢雨欣" --interval 2 --model small
+    python tools/live_monitor.py --name "联系人名称"
+    python tools/live_monitor.py --name "联系人名称" --interval 2 --model small
 
 架构:
     1. 监听 WeChat DB 文件 mtime 变化

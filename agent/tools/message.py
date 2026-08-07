@@ -288,6 +288,10 @@ def _format_message_body(m: dict) -> tuple[str, str]:
         return ("文件", content[:200] if content else "[文件]")
     else:
         type_name = MSG_TYPES.get(lt, f"type={lt}")
+        # 未知类型但包含 appmsg XML → 尝试解析（引用、链接、小程序、转写等）
+        if content and '<appmsg' in content:
+            sub_type, summary = _parse_type49(content)
+            return (f"{sub_type}", summary)
         return (type_name, content[:300] if content else f"[{type_name}]")
 
 

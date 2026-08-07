@@ -146,7 +146,7 @@ def main():
     print("\n=== 提取 filehelper 测试语音 ===")
     samples = extract_sample_audio(conn, chat_name_id=5, limit=3)
     if not samples:
-        print("  filehelper 没有语音, 改用 chat_name_id=1 (谢雨欣)")
+        print("  filehelper 没有语音, 改用 chat_name_id=1 (联系人名称)")
         samples = extract_sample_audio(conn, chat_name_id=1, limit=1)
 
     if not samples:

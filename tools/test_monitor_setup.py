@@ -30,14 +30,14 @@ for area in ["message", "contact", "session"]:
         dbs = [f for f in os.listdir(area_dir) if f.endswith('.db')]
         print(f"  {area}/: {len(dbs)} 个DB — {dbs}")
 
-# 2. 查找谢雨欣
-print("\n[2] 查找谢雨欣:")
+# 2. 查找联系人名称
+print("\n[2] 查找联系人名称:")
 contact_db = os.path.join(DECRYPTED_DIR, "contact", "contact.db")
 username = None
 conn = sqlite3.connect(contact_db)
 rows = conn.execute("SELECT username, remark, nick_name FROM contact").fetchall()
 for uname, remark, nick in rows:
-    if '谢雨欣' in str(remark) or '谢雨欣' in str(nick):
+    if '联系人名称' in str(remark) or '联系人名称' in str(nick):
         username = uname
         # 安全打印，过滤 emoji
         safe_nick = (nick or '').encode('ascii', errors='replace').decode('ascii')
@@ -46,7 +46,7 @@ for uname, remark, nick in rows:
 conn.close()
 
 if not username:
-    print("  [FAIL] 未找到谢雨欣!")
+    print("  [FAIL] 未找到联系人名称!")
     sys.exit(1)
 
 # 3. 查找消息表
@@ -121,10 +121,10 @@ for ts, lt, lid, content, ct, sid in rows:
         text = str(content)
     ts_str = datetime.fromtimestamp(ts).strftime('%H:%M:%S')
     type_name = {1: '文本', 3: '图片', 34: '语音', 47: '表情'}.get(lt, f'type={lt}')
-    sender = '谢雨欣' if sid == 1 else ('你' if sid == 2 else f'ID-{sid}')
+    sender = '联系人名称' if sid == 1 else ('你' if sid == 2 else f'ID-{sid}')
     print(f"  [{ts_str}] {sender} | {type_name}: {text[:80]}")
 
 print(f"\n[OK] 所有检查通过！live_monitor.py 可以正常运行")
 print(f"\n启动命令:")
 print(f"  source .venv/Scripts/activate")
-print(f"  python tools/live_monitor.py --name '谢雨欣' --model tiny")
+print(f"  python tools/live_monitor.py --name '联系人名称' --model tiny")

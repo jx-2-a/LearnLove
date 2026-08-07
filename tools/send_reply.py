@@ -6,7 +6,7 @@
     → 文字复制到剪贴板 → 你切到微信 Ctrl+V 回车
 
 自动模式 (微信窗口需打开):
-    python tools/send_reply.py --text "好的，晚安~" --send --to "谢雨欣"
+    python tools/send_reply.py --text "好的，晚安~" --send --to "联系人名称"
     → 自动激活微信 → 搜索联系人 → 粘贴发送
 
 依赖:

@@ -65,6 +65,11 @@ memory:
   compact_turns: 30
   inject_tail_lines: 20
 
+# --- 可选: 复盘分析 ---
+review:
+  initial_message_limit: 100       # 首次复盘拉取的消息条数（无历史记录时），最大 200
+  include_previous_summary: true   # 是否在分析中注入上次复盘摘要作为上下文
+
 # --- 可选: 活跃技能 ---
 active_skills:
   - warm_caring

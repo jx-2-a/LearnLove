@@ -762,7 +762,7 @@ def get_live_feed(chat_name: str = "", mark_read: bool = True) -> str:
     """读取 live_monitor.py 监听到的最新消息，用于实时对话提示。
 
     用法：
-    1. 先让用户在后台运行: python tools/live_monitor.py --name "谢雨欣"
+    1. 先让用户在后台运行: python tools/live_monitor.py --name "联系人名称"
     2. 当用户问"有什么新消息"时，调用此工具
     3. 返回自上次读取以来的新消息（包含已解码的语音文字）
 

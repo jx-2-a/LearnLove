@@ -3,8 +3,8 @@
 支持增量缓存，断点续传
 
 用法:
-    python tools/transcribe_voice.py --name "谢雨欣" --model small
-    python tools/transcribe_voice.py --name "谢雨欣" --model tiny   # 快速测试
+    python tools/transcribe_voice.py --name "联系人名称" --model small
+    python tools/transcribe_voice.py --name "联系人名称" --model tiny   # 快速测试
     python tools/transcribe_voice.py --list-chats                    # 列出所有有语音的会话
 """
 import sqlite3, os, sys, json, hashlib, argparse, tempfile, wave, time
@@ -402,7 +402,7 @@ def main():
         if from_cache:
             n_cached += 1
 
-        sender = "谢雨欣" if m["sender_id"] == 1 else ("你" if m["sender_id"] == 2 else f"ID-{m['sender_id']}")
+        sender = "联系人名称" if m["sender_id"] == 1 else ("你" if m["sender_id"] == 2 else f"ID-{m['sender_id']}")
 
         results.append({
             "time": ts_str,

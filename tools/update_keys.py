@@ -21,16 +21,22 @@ RESERVE_SZ = 80
 IV_SZ = 16
 HMAC_SZ = 64
 
-# --- 配置 ---
+# --- 配置（从 config.py 读取）---
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-WECHAT_DECRYPT_DIR = os.path.join(PROJECT_ROOT, "wechat-decrypt")
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "wechat-decrypt"))
+from config import load_config, CONFIG_DIR
+
+_cfg = load_config()
+DB_DIR = _cfg["db_dir"]
+ALL_KEYS_FILE = _cfg["keys_file"]
+if not os.path.isabs(ALL_KEYS_FILE):
+    ALL_KEYS_FILE = os.path.join(CONFIG_DIR, ALL_KEYS_FILE)
+
 CHATLOG_KEEPER_DIR = os.path.join(PROJECT_ROOT, "chatlog-keeper")
 CACHED_KEY_PATH = os.path.join(
     os.environ.get("LOCALAPPDATA", ""),
     "chatlog-keeper", "data", "secrets", "wechat_db.key"
 )
-DB_DIR = r"D:\WeChat\Record\xwechat_files\wxid_l07mzpzpbnv522_156b\db_storage"
-ALL_KEYS_FILE = os.path.join(WECHAT_DECRYPT_DIR, "all_keys.json")
 
 
 def load_master_key():

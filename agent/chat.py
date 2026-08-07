@@ -642,53 +642,115 @@ REVIEW_SYSTEM_PROMPT = """你是一个专业的聊天复盘教练。你的任务
 - 如果用户明显犯错，温和但明确地指出
 - 如果用户做得好，具体说明哪里好
 - 关注"用户能控制的事"，不纠结对方怎么想
+- 如果提供了「上文回顾」，注意前后关联，指出变化和趋势
 
 ## 输出格式
 用清晰的分段，每段有小标题。总长度不超过 600 字。"""
 
 
+def _load_review_state(contact_name: str) -> dict | None:
+    """加载复盘进度文件。不存在或损坏返回 None。"""
+    from agent.paths import review_state_path
+    path = review_state_path(contact_name)
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    return None
+
+
+def _save_review_state(contact_name: str, state: dict):
+    """保存复盘进度文件"""
+    from agent.paths import review_state_path
+    path = review_state_path(contact_name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+
 def _do_review(contact_name: str, contact_wxid: str, llm_cfg: dict, config: dict):
-    """复盘分析：拉取最近聊天记录，用教练视角分析对话，帮用户学习成长。"""
+    """复盘分析：基于时间戳增量拉取聊天记录，用教练视角分析对话，帮用户学习成长。"""
     from agent.tools.message import get_chat_history
     from agent.llm import chat_simple
+    import time as _time
 
     _print(f"\n  🔍 正在调取 {contact_name} 的聊天记录...", style="cyan")
 
-    # 拉取最近 60 条消息
-    result = get_chat_history(contact_name=contact_name, limit=60)
+    # ---- 1. 读取配置 ----
+    review_cfg = config.get("review", {})
+    initial_limit = review_cfg.get("initial_message_limit", 100)
+    include_prev_summary = review_cfg.get("include_previous_summary", True)
+
+    # ---- 2. 读取复盘进度 ----
+    prev_state = _load_review_state(contact_name)
+    last_review_ts = prev_state.get("last_review_ts", None) if prev_state else None
+    prev_summary = prev_state.get("last_summary", None) if prev_state else None
+    total_reviews = prev_state.get("total_reviews", 0) if prev_state else 0
+
+    # ---- 3. 根据是否有历史记录决定查询策略 ----
+    if last_review_ts is not None:
+        result = get_chat_history(
+            contact_name=contact_name,
+            since_ts=last_review_ts,
+            before_ts=_time.time(),
+            limit=initial_limit,
+        )
+        _print(f"  📍 增量分析：自上次复盘后", style="dim")
+    else:
+        result = get_chat_history(contact_name=contact_name, limit=initial_limit)
+        _print(f"  📍 首次分析：拉取最近 {initial_limit} 条", style="dim")
+
     if not result.get("ok"):
         _print(f"  ❌ 获取聊天记录失败: {result.get('error', '未知错误')}", style="red")
         return
 
     messages = result["data"].get("messages", [])
     if not messages:
-        _print(f"  📭 暂无 {contact_name} 的聊天记录", style="yellow")
+        if total_reviews > 0:
+            _print(f"  📭 {contact_name} 暂无新消息（上次复盘后没有新的聊天记录）", style="yellow")
+        else:
+            _print(f"  📭 暂无 {contact_name} 的聊天记录", style="yellow")
         return
 
-    # 格式化聊天记录
+    # ---- 4. 正序排列（按时间顺序，更符合复盘阅读习惯） ----
+    messages_asc = sorted(messages, key=lambda m: m["create_time"])
+    min_ts = messages_asc[0]["create_time"]
+    max_ts = messages_asc[-1]["create_time"]
+
+    # ---- 5. 检测是否达到拉取上限 ----
+    hit_limit = len(messages) >= min(initial_limit, 200)
+
+    # ---- 6. 格式化聊天记录 ----
     lines = []
-    for m in messages:
+    for m in messages_asc:
         sender = m.get("sender", "?")
         content = m.get("content", "")
         t = m.get("time", "")
         msg_type = m.get("type", "")
-        # 跳过太长的单条消息
         if len(content) > 500:
             content = content[:500] + "..."
         type_tag = f" [{msg_type}]" if msg_type and msg_type != "文本" else ""
         lines.append(f"[{t}] {sender}{type_tag}: {content}")
 
     chat_text = "\n".join(lines)
-    _print(f"  📊 已加载 {len(messages)} 条消息，正在分析...", style="cyan")
+    time_range = (
+        f"{datetime.fromtimestamp(min_ts).strftime('%m-%d %H:%M')} ~ "
+        f"{datetime.fromtimestamp(max_ts).strftime('%m-%d %H:%M')}"
+    )
+    _print(f"  📊 已加载 {len(messages)} 条消息（{time_range}），正在分析...", style="cyan")
 
-    # 构建分析请求
-    user_prompt = f"""## 联系人: {contact_name}
-## 聊天记录（共 {len(messages)} 条）
-{chat_text}
+    # ---- 7. 构建 user_prompt ----
+    user_prompt = (
+        f"## 联系人: {contact_name}\n"
+        f"## 时间范围: {time_range}\n"
+        f"## 聊天记录（共 {len(messages)} 条）\n"
+        f"{chat_text}\n\n"
+        f"请对以上对话进行复盘分析。"
+    )
 
-请对以上对话进行复盘分析。"""
-
-    # 尝试加载技能上下文
+    # ---- 8. 加载技能上下文（保留现有逻辑） ----
     skill_context = ""
     try:
         from agent.tool_manager import skillmgr
@@ -704,8 +766,18 @@ def _do_review(contact_name: str, contact_wxid: str, llm_cfg: dict, config: dict
     except Exception:
         pass
 
-    full_system = REVIEW_SYSTEM_PROMPT + skill_context
+    # ---- 9. 注入上次复盘摘要作为"上文回顾" ----
+    previous_context = ""
+    if include_prev_summary and prev_summary:
+        previous_context = (
+            f"\n\n## 上文回顾（第 {total_reviews} 次复盘摘要）\n"
+            f"{prev_summary[:500]}\n"
+            f"(以上为上次复盘的关键结论，请结合上下文注意前后变化和趋势)"
+        )
 
+    full_system = REVIEW_SYSTEM_PROMPT + previous_context + skill_context
+
+    # ---- 10. 调用 LLM 分析 ----
     _print("  ▸ 分析中...", style="dim")
     try:
         analysis = chat_simple(
@@ -721,23 +793,46 @@ def _do_review(contact_name: str, contact_wxid: str, llm_cfg: dict, config: dict
         _print(f"  ❌ 分析失败: {analysis}", style="red")
         return
 
-    # 输出分析结果
+    # ---- 11. 输出分析结果 ----
     _print(f"\n{'─' * 50}", style="dim")
     _print(f"  📊 {contact_name} — 对话复盘分析", style="bold cyan")
+    _print(f"  📅 {time_range}", style="dim")
+    if total_reviews > 0:
+        _print(f"  📝 第 {total_reviews + 1} 次复盘", style="dim")
     _print(f"{'─' * 50}", style="dim")
     _print(analysis)
     _print(f"{'─' * 50}\n", style="dim")
 
-    # 保存复盘记录
+    # ---- 12. 保存复盘进度 ----
+    new_state = {
+        "last_review_ts": max_ts,
+        "last_review_time": datetime.now().isoformat(),
+        "total_reviews": total_reviews + 1,
+        "last_summary": analysis[:1000],
+    }
+    _save_review_state(contact_name, new_state)
+
+    if hit_limit:
+        _print(f"  ⚠️ 消息数量达到单次分析上限（{min(initial_limit, 200)} 条），更早的消息可能未被覆盖。"
+               f"建议提高复盘频率或增大 initial_message_limit。", style="yellow")
+
+    # ---- 13. 保存复盘报告 ----
     try:
         from agent.paths import reviews_dir
-        import os as _os
         review_dir = reviews_dir()
-        _os.makedirs(review_dir, exist_ok=True)
-        review_file = _os.path.join(review_dir, f"{contact_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md")
+        os.makedirs(review_dir, exist_ok=True)
+        review_file = os.path.join(
+            review_dir,
+            f"{contact_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+        )
         with open(review_file, "w", encoding="utf-8") as f:
             f.write(f"# {contact_name} 复盘分析 — {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n")
-            f.write(analysis)
+            f.write(f"- **时间范围**: {time_range}\n")
+            f.write(f"- **消息数**: {len(messages)}\n")
+            f.write(f"- **第 {new_state['total_reviews']} 次复盘**\n")
+            if last_review_ts:
+                f.write(f"- **增量模式**: 是（since {datetime.fromtimestamp(last_review_ts).strftime('%Y-%m-%d %H:%M')}）\n")
+            f.write(f"\n{analysis}")
             f.write(f"\n\n---\n原始消息数: {len(messages)}")
         _print(f"  💾 已保存: {review_file}", style="dim")
     except Exception:

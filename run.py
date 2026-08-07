@@ -3,13 +3,13 @@ LearnLove — 微信聊天记录分析工具集
 
 用法:
     # 1. 提取聊天记录
-    python tools/extract_chat.py --name "谢雨欣" --days 90
+    python tools/extract_chat.py --name "联系人名称" --days 90
 
     # 2. 批量语音转文字
-    python tools/transcribe_voice.py --name "谢雨欣" --model small
+    python tools/transcribe_voice.py --name "联系人名称" --model small
 
     # 3. 实时监听新消息（后台运行）
-    python tools/live_monitor.py --name "谢雨欣"
+    python tools/live_monitor.py --name "联系人名称"
 
     # 4. 列出所有会话
     python tools/extract_chat.py --list
@@ -42,7 +42,7 @@ def run_script(name, *args):
 def main():
     parser = argparse.ArgumentParser(
         description="LearnLove 微信聊天分析工具",
-        epilog="示例: python run.py transcribe --name 谢雨欣"
+        epilog="示例: python run.py transcribe --name 联系人名称"
     )
     sub = parser.add_subparsers(dest="command")
 

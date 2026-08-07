@@ -112,6 +112,11 @@ def context_json_path(name: str) -> str:
     return os.path.join(memory_dir(name), "context.json")
 
 
+def review_state_path(name: str) -> str:
+    """复盘进度文件 — 记录上次复盘的时间戳和摘要，用于增量分析。"""
+    return os.path.join(memory_dir(name), "review_state.json")
+
+
 def voice_cache_dir() -> str:
     return os.path.join(get_user_data_dir(), "voice_cache")
 
