@@ -319,43 +319,78 @@ def _find_msg_table(wxid: str) -> list[tuple[str, str]]:
 
 
 def _learn_sender_map(conn, table_name: str, wxid: str, display_name: str) -> dict:
-    """从消息 XML 中动态学习 sender_id → 名称的映射"""
+    """从消息 XML 中学习 real_sender_id → 名称 的映射。
+
+    逐层尝试：语音/表情 → 链接/文件 → 全表搜索 fromusername。
+    避免因为某类消息缺失就 fallback 到错误的 {1, 2} 假设。
+    """
     sender_map = {}
+
+    def _try_learn(msg_types: list[int], limit: int = 100) -> bool:
+        if not msg_types:
+            return False
+        placeholders = ",".join("?" * len(msg_types))
+        try:
+            rows = conn.execute(
+                f"SELECT real_sender_id, message_content, WCDB_CT_message_content "
+                f"FROM [{table_name}] WHERE local_type IN ({placeholders}) "
+                f"ORDER BY create_time DESC LIMIT {limit}",
+                msg_types
+            ).fetchall()
+            for sid, content, ct in rows:
+                if sid in sender_map:
+                    continue
+                text = _decode_text(content, ct)
+                m = re.search(r'fromusername\s*=\s*"([^"]+)"', text)
+                if m:
+                    from_user = m.group(1)
+                    sender_map[sid] = display_name if from_user == wxid else "你"
+            return len(sender_map) > 0
+        except Exception:
+            return False
+
+    # 第一层：语音(34) + 表情(47) — XML 最规整
+    if _try_learn([34, 47], limit=50):
+        return sender_map
+
+    # 第二层：链接/文件(49) + 视频号(244813135921) — 也有 XML
+    if _try_learn([49, 244813135921], limit=50):
+        return sender_map
+
+    # 第三层：全表搜 fromusername（不限消息类型）
     try:
         rows = conn.execute(
             f"SELECT real_sender_id, message_content, WCDB_CT_message_content "
-            f"FROM [{table_name}] WHERE local_type IN (34, 47) LIMIT 20"
+            f"FROM [{table_name}] WHERE message_content LIKE '%fromusername%' "
+            f"ORDER BY create_time DESC LIMIT 200"
         ).fetchall()
         for sid, content, ct in rows:
+            if sid in sender_map:
+                continue
             text = _decode_text(content, ct)
             m = re.search(r'fromusername\s*=\s*"([^"]+)"', text)
             if m:
                 from_user = m.group(1)
-                if from_user == wxid:
-                    sender_map[sid] = display_name
-                else:
-                    sender_map[sid] = "你"
+                sender_map[sid] = display_name if from_user == wxid else "你"
     except Exception:
         pass
+
     return sender_map
 
 
 def _get_sender_map(conn, table_name: str, wxid: str, display_name: str) -> dict:
-    """获取或学习 sender_map，默认 {1: display_name, 2: '你'}"""
-    # 先尝试从缓存获取
-    if wxid in state.sender_maps and state.sender_maps[wxid]:
-        return state.sender_maps[wxid]
+    """获取或学习 sender_map。学不到就返回空 map（由调用方按 sid=X 显示），
+    不再假设 {1: 联系人, 2: 你}——那个假设在很多数据库中不成立。
+    """
+    # 先尝试从缓存获取（用 None 哨兵区分"未缓存"和"缓存了但为空"）
+    cached = state.sender_maps.get(wxid, None)
+    if cached is not None:
+        return cached
 
     # 学习
     smap = _learn_sender_map(conn, table_name, wxid, display_name)
-    if smap:
-        state.sender_maps[wxid] = smap
-        return smap
-
-    # 默认
-    default = {1: display_name, 2: "你"}
-    state.sender_maps[wxid] = default
-    return default
+    state.sender_maps[wxid] = smap  # 缓存结果（即便是空 map）
+    return smap
 
 
 def _query_messages(conn, table_name: str, since_ts: float = 0,
