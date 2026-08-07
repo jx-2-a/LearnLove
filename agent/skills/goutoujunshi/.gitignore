@@ -1,0 +1,8 @@
+.DS_Store
+.idea/
+.vscode/
+__pycache__/
+*.pyc
+
+# The raw research workspace is intentionally not part of the distributable skill.
+/恋爱知识库/

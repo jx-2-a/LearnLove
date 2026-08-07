@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environment
+.venv/
+
+# IDE & Tools
+.claude/
+.vscode/
+
+# Sensitive data — privacy files, never commit
+data/
+learnlove_data/
+wechat-decrypt/all_keys.json
+wechat-decrypt/decrypted/
+wechat-decrypt/decoded_images/
+wechat-decrypt/config.json
+chatlog-keeper/out/
+
+# Sensitive config — real API keys should never be in git
+agent/config.yaml
+*.secret.yaml
+*.local.yaml
+*_local.yaml
+
+# OS
+.DS_Store
+Thumbs.db

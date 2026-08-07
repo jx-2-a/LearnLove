@@ -1,0 +1,29 @@
+name: 知识与内容建议
+description: 补充来源、场景、话术或包容性改进
+title: "[Content] "
+labels: ["content"]
+body:
+  - type: dropdown
+    id: category
+    attributes:
+      label: 内容类型
+      options:
+        - 研究或来源
+        - 法律与安全
+        - 关系场景
+        - 话术与沟通
+        - LGBTQ+与多元关系
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议内容
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 来源或实践依据
+      description: 如有，请优先提供原始研究或权威来源。

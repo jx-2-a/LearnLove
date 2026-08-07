@@ -1,0 +1,25 @@
+# Decrypted databases and keys - NEVER upload
+all_keys.json
+wechat_key.txt
+config.json
+decrypted/
+decoded_images/
+*.db
+*.db-shm
+*.db-wal
+*.db.tmp_monitor
+
+# Hook outputs
+hook_output.txt
+hook_start_output.txt
+hook_stderr.txt
+run_hook.bat
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db

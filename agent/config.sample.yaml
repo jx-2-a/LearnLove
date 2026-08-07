@@ -1,0 +1,74 @@
+# ============================================================
+# LearnLove Agent 配置模板
+#
+# 使用方法:
+#   1. 复制此文件到你的用户数据目录（默认 ~/.learnlove_data/config.yaml）
+#   2. 填入你的真实值
+#   3. 勿提交真实配置到 git！
+#
+# 数据目录可在启动时通过 --data-dir 或 LEARNLOVE_USER_DATA 环境变量指定
+# ============================================================
+
+# --- 必填: 微信数据 ---
+wechat:
+  db_dir: "D:\\WeChat\\Record\\xwechat_files\\wxid_xxxxx\\db_storage"
+  keys_file: "~/.learnlove_data/.wechat-decrypt/all_keys.json"
+  decrypted_dir: "~/.learnlove_data/.wechat-decrypt/decrypted"
+
+# --- 必填: LLM API ---
+llm:
+  provider: "deepseek"           # deepseek | openai | custom
+  model: "deepseek-v4-flash"
+  api_base: "https://api.deepseek.com"
+  api_key: "sk-REPLACE_ME"       # 替换为你的 API key — 勿提交 git!
+  temperature: 0.7
+  max_tokens: 4096
+
+# --- 必填: 监听的联系人 ---
+contacts:
+  - wxid: "wxid_xxxxx"
+    name: "联系人名称"
+    auto_monitor: true
+    voice_mode: "auto"           # auto | manual
+    whisper_model: "small"       # tiny | small | medium
+
+# --- 可选: 阀门 ---
+valve:
+  level: 1                       # 0=只读 1=建议+剪贴板 2=自动发送
+
+# --- 可选: 智能体参数 ---
+agent:
+  # 自动模式
+  auto:
+    enabled: false
+    suggestion_count: 3
+    auto_copy: false
+    auto_send: false             # 需要 valve>=2
+    min_interval: 5
+
+  # 上下文
+  context:
+    max_history_turns: 20
+    max_context_tokens: 8000
+    compress_older: true
+
+  # 回复
+  reply:
+    max_length: 200
+    style: "warm_caring"
+
+# --- 可选: 记忆 ---
+memory:
+  enabled: true
+  max_memory_chars: 4000
+  transcript_max_chars: 60000
+  compact_turns: 30
+  inject_tail_lines: 20
+
+# --- 可选: 活跃技能 ---
+active_skills:
+  - warm_caring
+  # - humorous
+  # - conflict_resolution
+  # - first_date
+  # - goutoujunshi

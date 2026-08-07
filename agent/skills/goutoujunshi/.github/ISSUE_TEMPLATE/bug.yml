@@ -1,0 +1,31 @@
+name: 问题报告
+description: 报告错误、断链、错误建议或安全边界问题
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: 请勿提交真实姓名、联系方式、私密聊天或其他可识别个人的信息。
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 匿名化场景
+      description: 使用虚构代号描述触发问题的输入。
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Codex或模型版本（如已知）
