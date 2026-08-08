@@ -446,6 +446,19 @@ TOOLS = [
             },
         },
     },
+    # ---- 时间 ----
+    {
+        "type": "function",
+        "function": {
+            "name": "get_current_time",
+            "description": "获取当前日期时间信息。在需要知道「现在是什么时候」「今天几号」「星期几」或计算时间差时使用。返回包含日期、时间、星期、Unix 时间戳的完整信息",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
     # ---- 系统 ----
     {
         "type": "function",

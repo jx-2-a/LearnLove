@@ -243,6 +243,30 @@ def _parse_docx(filepath: str) -> str:
     return '\n'.join(paragraphs)
 
 
+def _get_current_time_handler() -> dict:
+    """返回当前日期时间信息，让 agent 知道「现在是什么时候」"""
+    from datetime import datetime
+    now = datetime.now()
+    weekday_cn = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+    return {
+        "ok": True,
+        "data": {
+            "datetime": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "date": now.strftime("%Y-%m-%d"),
+            "time": now.strftime("%H:%M:%S"),
+            "year": now.year,
+            "month": now.month,
+            "day": now.day,
+            "hour": now.hour,
+            "minute": now.minute,
+            "weekday": weekday_cn[now.weekday()],
+            "weekday_en": now.strftime("%A"),
+            "unix_ts": now.timestamp(),
+            "iso": now.isoformat(),
+        },
+    }
+
+
 def _read_file_handler(path: str) -> dict:
     """读取本地文件（纯文本 + docx 文档）"""
     if not path or not isinstance(path, str):
@@ -349,6 +373,8 @@ TOOL_MAP = {
     "peek_contact": _peek_contact_handler,
     # 文件
     "read_file": _read_file_handler,
+    # 时间
+    "get_current_time": _get_current_time_handler,
     # 系统
     "view_output": _view_output_handler,
 }

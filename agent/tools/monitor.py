@@ -173,18 +173,15 @@ def _monitor_loop(wxids: list[str], interval: float = 2.0):
                         text = _decode_text(content, ct)
                         sender = smap.get(sid, f"sid={sid}")
                         ts_str = datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
-                        type_name = MSG_TYPES.get(lt, f"type={lt}")
 
-                        # 格式化
-                        body = text
-                        if lt == 34:
-                            body = f"[语音] (待转录)"
-                        elif lt == 47:
-                            body = "[表情]"
-                        elif lt == 3:
-                            body = "[图片]"
-                        elif lt not in (1,):
-                            body = f"[{type_name}]"
+                        # 格式化 — 复用 message.py 的逻辑，正确解析引用/链接/视频号等
+                        from agent.tools.message import _format_message_body
+                        msg_for_format = {
+                            "local_type": lt,
+                            "content": text,
+                            "voice_text": None,
+                        }
+                        type_name, body = _format_message_body(msg_for_format)
 
                         entry = {
                             "time": ts_str,

@@ -274,6 +274,7 @@ def run_chat(config: dict):
     chat_messages = []
     last_suggestion = ""
     coach_mode = False  # 咨询模式：不看聊天记录，纯讨论
+    review_context = ""  # 复盘分析结果，切入咨询模式时注入
 
     # 辅助：保存/加载会话上下文（agent <-> 用户对话，非微信消息）
     def _save_context(name: str, msgs: list, keep: int = 40):
@@ -325,7 +326,8 @@ def run_chat(config: dict):
                     entry_content = entry.get("content", "")
                     entry_type = entry.get("type", 1)
 
-                    _print(f"\n  📩 [自动] {entry_contact} ({entry.get('time', '')}): {entry_content[:100]}", style="yellow")
+                    # 自己的消息：显示但不分析，作为上下文保留
+                    is_self = (entry_contact == "你")
 
                     # 语音消息处理
                     if entry_type == 34:
@@ -364,17 +366,29 @@ def run_chat(config: dict):
                             contact_memory = ContactMemory(contact_name, llm_cfg)
                             contact_memory.startup()
 
+                    # 打印消息（自己的和对方的用不同标记）
+                    if is_self:
+                        _print(f"  📤 [你] {entry_content[:80]}", style="dim")
+                    else:
+                        _print(f"\n  📩 [自动] {entry_contact} ({entry.get('time', '')}): {entry_content[:100]}", style="yellow")
+
                     processed.append({
                         "sender": entry_contact,
                         "content": entry_content,
                         "time": entry.get("time", ""),
+                        "is_self": is_self,
                     })
 
                 if not processed:
                     continue
 
+                # 如果全是自己的消息，不触发分析（只作为上下文记住）
+                from_contact = [m for m in processed if not m.get("is_self")]
+                if not from_contact:
+                    continue
+
                 # === Step 2: 批量构建上下文 + LLM 调用（带「偷跑检测」） ===
-                _print(f"  ▸ 批量处理 {len(processed)} 条新消息...", style="dim")
+                _print(f"  ▸ 批量处理 {len(processed)} 条消息（{len(from_contact)} 条来自对方）...", style="dim")
 
                 reply = None
                 max_retries = 2  # 最多追加两轮，防止对方刷屏死循环
@@ -397,12 +411,24 @@ def run_chat(config: dict):
                     if not late_entries:
                         break  # 没有新消息，直接输出
 
-                    # 有新消息！预处理后追加到批次，重新分析
+                    # 有新消息！预处理后追加到批次
                     late_processed = []
                     for entry in late_entries:
                         entry_contact = entry.get("sender", "?")
                         entry_content = entry.get("content", "")
                         entry_type = entry.get("type", 1)
+                        is_self = (entry_contact == "你")
+
+                        # 自己的消息只静默记录
+                        if is_self:
+                            _print(f"  📤 [偷跑·你] {entry_content[:60]}", style="dim")
+                            late_processed.append({
+                                "sender": entry_contact,
+                                "content": entry_content,
+                                "time": entry.get("time", ""),
+                                "is_self": True,
+                            })
+                            continue
 
                         # 语音跳过（偷跑消息的语音暂不处理，避免阻塞）
                         if entry_type == 34:
@@ -414,12 +440,18 @@ def run_chat(config: dict):
                             "sender": entry_contact,
                             "content": entry_content,
                             "time": entry.get("time", ""),
+                            "is_self": False,
                         })
 
                     if late_processed:
                         processed.extend(late_processed)
-                        _print(f"  🔄 思考中到达 {len(late_processed)} 条，合并重分析（第 {retry + 1} 次）...", style="dim")
-                        continue
+                        # 只有对方发了新消息才重新分析
+                        late_from_contact = [m for m in late_processed if not m.get("is_self")]
+                        if late_from_contact:
+                            _print(f"  🔄 思考中到达 {len(late_from_contact)} 条，合并重分析（第 {retry + 1} 次）...", style="dim")
+                            continue
+                        else:
+                            break  # 只有自己的消息，不重分析
                     else:
                         break  # 全是语音且跳过了
 
@@ -462,17 +494,16 @@ def run_chat(config: dict):
 
             # 获取用户输入
             if state.monitor_running:
-                # 自动模式：先显示提示符，再轮询等待（不阻塞监控队列）
+                # 自动模式：轮询等待输入，同时不阻塞监控队列
+                # 用 \r 保持在同行刷新，不堆空行
                 import msvcrt
                 user_input = None
                 p = "咨询 > " if coach_mode else "你 > "
                 for i in range(40):  # 最多等 20 秒（40 × 0.5s）
                     if i == 0:
-                        # 在轮询开始前就显示提示符，用户知道可以输入
-                        sys.stdout.write(p)
+                        sys.stdout.write(f"\r{p}")
                         sys.stdout.flush()
                     if msvcrt.kbhit():
-                        # 提示符已经显示，用空提示符读取（避免重复打印）
                         user_input = input("").strip()
                         break
                     time.sleep(0.5)
@@ -484,9 +515,13 @@ def run_chat(config: dict):
                             break
                     except Exception:
                         pass
+                    # 每轮刷新提示符（\r 回到行首，保持在同一行）
+                    if i > 0 and i % 4 == 0:  # 每 2 秒刷新一次
+                        sys.stdout.write(f"\r{p}")
+                        sys.stdout.flush()
                 else:
-                    # 超时无输入无新消息，换行后继续循环
-                    sys.stdout.write("\n")
+                    # 超时无输入无新消息 → 回到顶部（\r 清掉提示符）
+                    sys.stdout.write("\r")
                     sys.stdout.flush()
                     continue
                 # 因为新消息退出 → 回到循环顶部 drain+处理
@@ -526,7 +561,16 @@ def run_chat(config: dict):
                         if loaded:
                             _print(f"  📝 已恢复对话上下文 ({len(loaded)} 条消息)", style="dim")
                 elif result == "review":
-                    _do_review(contact_name, contact_wxid, llm_cfg, config)
+                    analysis_text = _do_review(contact_name, contact_wxid, llm_cfg, config)
+                    # 复盘完成后自动切咨询模式，方便讨论分析结果
+                    if not coach_mode:
+                        if contact_name and chat_messages:
+                            _save_context(contact_name, chat_messages)
+                        coach_mode = True
+                        if analysis_text:
+                            review_context = analysis_text
+                        _print("  💬 已自动切换到咨询模式 — 可以直接讨论复盘内容", style="cyan")
+                        chat_messages = []
                 elif result == "toggle_coach":
                     coach_mode = not coach_mode
                     if coach_mode:
@@ -553,6 +597,19 @@ def run_chat(config: dict):
                 skill_mod = _get_skill_modifiers()
                 if skill_mod:
                     msg_context.append({"role": "system", "content": skill_mod})
+                # 注入复盘上下文（从 /review 切过来的）
+                if review_context:
+                    msg_context.append({
+                        "role": "system",
+                        "content": (
+                            f"## ⚠️ 重要：以下是刚才对 {contact_name} 的复盘分析结果\n\n"
+                            f"{review_context}\n\n"
+                            f"---\n"
+                            f"请基于以上复盘分析结果与用户展开讨论。用户可能会问复盘中的具体问题、"
+                            f"想深入某个建议、或讨论后续怎么做。主动引导用户思考复盘中最关键的发现，"
+                            f"帮他落实到具体行动上。不要只是复述复盘内容——要像朋友聊天一样自然地讨论。"
+                        ),
+                    })
                 # 注入记忆和风格
                 mem = contact_memory.memory_text() if contact_memory else ""
                 if mem:
@@ -720,8 +777,12 @@ def _save_review_state(contact_name: str, state: dict):
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
-def _do_review(contact_name: str, contact_wxid: str, llm_cfg: dict, config: dict):
-    """复盘分析：基于时间戳增量拉取聊天记录，用教练视角分析对话，帮用户学习成长。"""
+def _do_review(contact_name: str, contact_wxid: str, llm_cfg: dict, config: dict) -> str | None:
+    """复盘分析：基于时间戳增量拉取聊天记录，用教练视角分析对话，帮用户学习成长。
+
+    Returns:
+        分析文本，失败返回 None
+    """
     from agent.tools.message import get_chat_history
     from agent.llm import chat_simple
     import time as _time
@@ -754,7 +815,7 @@ def _do_review(contact_name: str, contact_wxid: str, llm_cfg: dict, config: dict
 
     if not result.get("ok"):
         _print(f"  ❌ 获取聊天记录失败: {result.get('error', '未知错误')}", style="red")
-        return
+        return None
 
     messages = result["data"].get("messages", [])
     if not messages:
@@ -762,7 +823,7 @@ def _do_review(contact_name: str, contact_wxid: str, llm_cfg: dict, config: dict
             _print(f"  📭 {contact_name} 暂无新消息（上次复盘后没有新的聊天记录）", style="yellow")
         else:
             _print(f"  📭 暂无 {contact_name} 的聊天记录", style="yellow")
-        return
+        return None
 
     # ---- 4. 正序排列（按时间顺序，更符合复盘阅读习惯） ----
     messages_asc = sorted(messages, key=lambda m: m["create_time"])
@@ -837,11 +898,11 @@ def _do_review(contact_name: str, contact_wxid: str, llm_cfg: dict, config: dict
         )
     except Exception as e:
         _print(f"  ❌ 分析失败: {e}", style="red")
-        return
+        return None
 
     if not analysis or analysis.startswith("[LLM 错误]"):
         _print(f"  ❌ 分析失败: {analysis}", style="red")
-        return
+        return None
 
     # ---- 11. 输出分析结果 ----
     _print(f"\n{'─' * 50}", style="dim")
@@ -887,6 +948,8 @@ def _do_review(contact_name: str, contact_wxid: str, llm_cfg: dict, config: dict
         _print(f"  💾 已保存: {review_file}", style="dim")
     except Exception:
         pass
+
+    return analysis
 
 
 def _handle_slash(command: str, config: dict, contact_name: str,

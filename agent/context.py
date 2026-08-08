@@ -179,19 +179,36 @@ class ContextBuilder:
             all_new = [new_message]
 
         if all_new:
-            if len(all_new) == 1:
-                m = all_new[0]
-                user_content = (
-                    f"[新消息 — 需要回复]\n"
-                    f"{m['sender']} ({m.get('time', '')}): {m['content']}"
-                )
-            else:
-                lines = [f"[新消息 ×{len(all_new)} — 以下是上次回复后对方发来的消息，一起看，给一条回复]"]
-                for m in all_new:
-                    lines.append(f"[{m.get('time', '')}] {m['sender']}: {m['content']}")
-                user_content = "\n".join(lines)
+            # 拆分为对方的消息（需要回复）和自己的消息（上下文参考）
+            from_contact = [m for m in all_new if not m.get("is_self")]
+            from_self = [m for m in all_new if m.get("is_self")]
 
-            messages.append({"role": "user", "content": user_content})
+            parts = []
+
+            if from_self:
+                # 用户在此期间发的消息——给 LLM 作为上下文
+                self_lines = ["[你在此期间发的消息 — 参考上下文]"]
+                for m in from_self:
+                    self_lines.append(f"[{m.get('time', '')}] 你: {m['content']}")
+                parts.append("\n".join(self_lines))
+
+            if from_contact:
+                # 对方发的新消息——需要回复
+                if len(from_contact) == 1:
+                    m = from_contact[0]
+                    parts.append(
+                        f"[新消息 — 需要回复]\n"
+                        f"{m['sender']} ({m.get('time', '')}): {m['content']}"
+                    )
+                else:
+                    contact_lines = [f"[新消息 ×{len(from_contact)} — 以下是上次回复后对方发来的消息，一起看，给一条回复]"]
+                    for m in from_contact:
+                        contact_lines.append(f"[{m.get('time', '')}] {m['sender']}: {m['content']}")
+                    parts.append("\n".join(contact_lines))
+
+            if parts:
+                user_content = "\n\n".join(parts)
+                messages.append({"role": "user", "content": user_content})
 
         return messages
 
