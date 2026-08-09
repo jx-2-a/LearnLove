@@ -706,7 +706,7 @@ _WX_APPMSG_FILE = 6          # 文件
 _WX_APPMSG_LOCATION = 17
 _WX_APPMSG_MERGED_FORWARD = 19  # 合并转发
 _WX_APPMSG_MINIPROGRAM = 33  # 小程序
-_WX_APPMSG_VIDEOACCT = 35    # 视频号
+_WX_APPMSG_VIDEOACCT = 35    # 引用
 _WX_APPMSG_REFERMSG = 57     # 引用消息 (回复)
 _WX_APPMSG_TRANSFER = 2000   # 转账
 _WX_APPMSG_REDPACKET = 2001  # 红包
@@ -807,7 +807,7 @@ def _extract_appmsg(root, app_sub_type: int) -> str:
             return f"[小程序 {sourcename}: {title}]"
         return f"[小程序: {title}]" if title else "[小程序]"
     if app_sub_type == _WX_APPMSG_VIDEOACCT:
-        return f"[视频号: {title}]" if title else "[视频号]"
+        return f"[引用: {title}]" if title else "[引用]"
     if app_sub_type == _WX_APPMSG_MERGED_FORWARD:
         return _format_merged_forward(appmsg, title)
     if app_sub_type == _WX_APPMSG_LOCATION:

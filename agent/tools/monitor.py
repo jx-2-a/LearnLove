@@ -97,7 +97,7 @@ def _learn_sender_map(conn, table_name: str, wxid: str, display_name: str) -> di
     if _try_learn([34, 47], limit=50):
         return sender_map
 
-    # 第二层：链接/文件(49) + 视频号(244813135921) — 也有 XML
+    # 第二层：链接/文件(49) + 引用(244813135921) — 也有 XML
     if _try_learn([49, 244813135921], limit=50):
         return sender_map
 
@@ -174,7 +174,7 @@ def _monitor_loop(wxids: list[str], interval: float = 2.0):
                         sender = smap.get(sid, f"sid={sid}")
                         ts_str = datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
 
-                        # 格式化 — 复用 message.py 的逻辑，正确解析引用/链接/视频号等
+                        # 格式化 — 复用 message.py 的逻辑，正确解析引用/链接/引用等
                         from agent.tools.message import _format_message_body
                         msg_for_format = {
                             "local_type": lt,

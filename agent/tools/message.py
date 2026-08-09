@@ -21,7 +21,7 @@ MSG_TYPES = {
     1: "文本", 3: "图片", 34: "语音", 43: "视频",
     47: "表情", 48: "位置", 49: "链接/引用/文件", 50: "VOIP",
     10000: "系统消息", 10002: "撤回",
-    244813135921: "视频号", 25769803825: "文件",
+    244813135921: "引用", 25769803825: "文件",
 }
 
 
@@ -104,7 +104,7 @@ def _decode_text(content, ct: int) -> str:
 
 
 def _parse_type49(xml_content: str) -> tuple[str, str]:
-    """解析 type 49 消息的 XML 内容，区分引用/链接/文件/视频号等子类型。
+    """解析 type 49 消息的 XML 内容，区分引用/链接/文件/引用等子类型。
 
     Returns: (类型标签, 摘要文本)
     """
@@ -169,7 +169,7 @@ def _parse_type49(xml_content: str) -> tuple[str, str]:
             if ref_dn_m:
                 ref_dn = ref_dn_m.group(1).strip()
 
-            # 被引用消息的类型（用于区分引用的是文本/图片/视频号等）
+            # 被引用消息的类型（用于区分引用的是文本/图片/引用等）
             ref_type_m = re.search(r'<type>\s*(\d+)\s*</type>', refermsg_block)
             if ref_type_m:
                 ref_type = ref_type_m.group(1)
@@ -200,7 +200,7 @@ def _parse_type49(xml_content: str) -> tuple[str, str]:
 
         # 组合标签：引用 + body 类型
         if body_is_finder:
-            type_label = "引用(视频号)"
+            type_label = "引用(引用)"
         elif body_is_file:
             type_label = "引用(文件)"
         elif body_is_link:
@@ -213,7 +213,7 @@ def _parse_type49(xml_content: str) -> tuple[str, str]:
         if body_parts:
             summary_parts.append("[正文] " + " — ".join(body_parts))
         elif body_is_finder:
-            summary_parts.append("[正文: 视频号分享]")
+            summary_parts.append("[正文: 引用分享]")
 
         return (type_label, " | ".join(summary_parts))
 
@@ -222,9 +222,9 @@ def _parse_type49(xml_content: str) -> tuple[str, str]:
         filename = title or des or ""
         return ("文件", filename if filename else "[文件]")
 
-    # 视频号分享（type 49 内的 finderFeed 标签，区别于独立 type 244813135921）
+    # 引用分享（type 49 内的 finderFeed 标签，区别于独立 type 244813135921）
     if body_is_finder:
-        return ("视频号", title or "[视频号分享]")
+        return ("引用", title or "[引用分享]")
 
     # 链接/文章
     if title:
@@ -262,7 +262,7 @@ def _format_message_body(m: dict) -> tuple[str, str]:
         return ("位置", "[位置]")
     elif lt == 49:
         sub_type, summary = _parse_type49(content)
-        # sub_type 已经包含了完整分类，如 "引用", "引用(视频号)", "链接", "视频号" 等
+        # sub_type 已经包含了完整分类，如 "引用", "引用(引用)", "链接", "引用" 等
         return (sub_type, summary)
     elif lt == 50:
         return ("VOIP", "[通话]")
@@ -271,19 +271,19 @@ def _format_message_body(m: dict) -> tuple[str, str]:
     elif lt == 10002:
         return ("撤回", "[消息已撤回]")
     elif lt == 244813135921:
-        # 独立视频号类型 — 内容也可能是 XML，统一走 type49 解析器
+        # 独立引用类型 — 内容也可能是 XML，统一走 type49 解析器
         if content and content.strip().startswith('<'):
             sub_type, summary = _parse_type49(content)
-            # 如果解析器没识别出视频号，覆盖为正确标签
-            if '视频号' not in sub_type:
-                sub_type = f"视频号({sub_type})" if sub_type != "引用" else "视频号(引用)"
+            # 如果解析器没识别出引用，覆盖为正确标签
+            if '引用' not in sub_type:
+                sub_type = f"引用({sub_type})" if sub_type != "引用" else "引用(引用)"
             return (sub_type, summary)
-        # 纯文本的视频号
+        # 纯文本的引用
         if content:
             title_m = re.search(r'<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>', content, re.DOTALL)
             if title_m:
-                return ("视频号", title_m.group(1).strip()[:200])
-        return ("视频号", content[:200] if content else "[视频号]")
+                return ("引用", title_m.group(1).strip()[:200])
+        return ("引用", content[:200] if content else "[引用]")
     elif lt == 25769803825:
         return ("文件", content[:200] if content else "[文件]")
     else:
@@ -353,7 +353,7 @@ def _learn_sender_map(conn, table_name: str, wxid: str, display_name: str) -> di
     if _try_learn([34, 47], limit=50):
         return sender_map
 
-    # 第二层：链接/文件(49) + 视频号(244813135921) — 也有 XML
+    # 第二层：链接/文件(49) + 引用(244813135921) — 也有 XML
     if _try_learn([49, 244813135921], limit=50):
         return sender_map
 
