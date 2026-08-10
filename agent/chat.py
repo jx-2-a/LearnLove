@@ -599,7 +599,8 @@ def run_chat(config: dict):
                         if loaded:
                             _print(f"  📝 已恢复对话上下文 ({len(loaded)} 条消息)", style="dim")
                 elif result == "review":
-                    analysis_text = _do_review(contact_name, contact_wxid, llm_cfg, config)
+                    analysis_text = _do_review(contact_name, contact_wxid, llm_cfg, config,
+                                               contact_memory=contact_memory)
                     # 复盘完成后自动切咨询模式，方便讨论分析结果
                     if not coach_mode:
                         if contact_name and chat_messages:
@@ -780,6 +781,21 @@ COACH_SYSTEM_PROMPT = """你是 LearnLove Agent 的咨询教练模式。你不�
 
 REVIEW_SYSTEM_PROMPT = """你是一个专业的聊天复盘教练。你的任务不是给回复建议，而是分析已经发生的对话，帮用户学习和成长。
 
+## 全局视角（最重要的原则）
+- 不要只盯眼前几句聊天。把这段对话放进「全局状态」里看——长期记忆、经验教训、关系阶段、双方风格，这些都是背景
+- 判断：这是新的发展，还是旧问题的延续？与过往模式一致还是出现了矛盾/变化？
+- 如果全局背景和当前对话有出入（比如对方行为变了、记忆过期了），明确指出
+- 复盘的价值在于「看懂全局」，而不是逐句点评
+
+## 工具使用（按需读取全局背景，不要一次全读）
+分析前如果觉得背景不足，调用对应工具补充，别凭空猜：
+- view_memory：读取长期记忆全文（关系阶段、对方信息、待办事项）
+- list_lessons：读取历史沉淀的沟通经验教训
+- view_style：读取双方语言风格
+- get_chat_history：拉取更多聊天记录
+- list_reviews / read_review：查看历史复盘报告
+已有「关系快照」和「上文回顾」时，用它们做基本盘，工具只补不足的细节
+
 ## 分析框架
 1. **对话脉络**: 用 2-3 句概括这段对话的走向和关键转折
 2. **对方状态**: 从对方的消息中推断 TA 的情绪、需求、潜台词
@@ -823,14 +839,46 @@ def _save_review_state(contact_name: str, state: dict):
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
-def _do_review(contact_name: str, contact_wxid: str, llm_cfg: dict, config: dict) -> str | None:
+def _build_review_snapshot(contact_name: str, contact_memory=None) -> str:
+    """从长期记忆提取精简的「关系快照」作为复盘的基本盘。
+
+    只取记忆开头（关系阶段 + 对方关键信息的前半），
+    完整内容不注入——让 agent 在分析时用工具按需读取。
+    """
+    mem = contact_memory.memory_text() if contact_memory else ""
+    if not mem:
+        try:
+            from agent.paths import memory_md_path
+            p = memory_md_path(contact_name)
+            if os.path.exists(p):
+                with open(p, "r", encoding="utf-8") as f:
+                    mem = f.read()
+        except Exception:
+            pass
+    if not mem or not mem.strip():
+        return ""
+
+    return (
+        f"\n\n## 关系快照（来自长期记忆的开头，完整内容用 view_memory 按需读取）\n"
+        f"{mem[:1000]}\n"
+    )
+
+
+def _do_review(contact_name: str, contact_wxid: str, llm_cfg: dict, config: dict,
+               contact_memory=None) -> str | None:
     """复盘分析：基于时间戳增量拉取聊天记录，用教练视角分析对话，帮用户学习成长。
+
+    Args:
+        contact_name: 联系人名称
+        contact_wxid: 联系人 wxid
+        llm_cfg: LLM 配置
+        config: 全局配置
+        contact_memory: 当前联系人的 ContactMemory 实例（可选，用于注入长期记忆）
 
     Returns:
         分析文本，失败返回 None
     """
     from agent.tools.message import get_chat_history
-    from agent.llm import chat_simple
     import time as _time
 
     _print(f"\n  🔍 正在调取 {contact_name} 的聊天记录...", style="cyan")
@@ -928,19 +976,30 @@ def _do_review(contact_name: str, contact_wxid: str, llm_cfg: dict, config: dict
     if include_prev_summary and prev_summary:
         previous_context = (
             f"\n\n## 上文回顾（第 {total_reviews} 次复盘摘要）\n"
-            f"{prev_summary[:500]}\n"
-            f"(以上为上次复盘的关键结论，请结合上下文注意前后变化和趋势)"
+            f"{prev_summary[:800]}\n"
+            f"(以上为上次复盘的关键结论，完整报告可用 read_review 按需读取)"
         )
 
-    full_system = _time_context_text() + "\n\n" + REVIEW_SYSTEM_PROMPT + previous_context + skill_context
+    # ---- 9.5 注入精简的关系快照（完整内容让 agent 用工具按需读取）----
+    snapshot_context = _build_review_snapshot(contact_name, contact_memory)
 
-    # ---- 10. 调用 LLM 分析 ----
+    full_system = (
+        REVIEW_SYSTEM_PROMPT
+        + snapshot_context
+        + previous_context
+        + skill_context
+    )
+
+    # ---- 10. 走工具循环分析（agent 可按需调用工具补充全局背景）----
     _print("  ▸ 分析中...", style="dim")
     try:
-        analysis = chat_simple(
-            user_message=user_prompt,
-            system_prompt=full_system,
-            config=llm_cfg,
+        msg_context = [{"role": "system", "content": full_system}]
+        msg_context.append({"role": "user", "content": user_prompt})
+        # 完整工具集：记忆/教训/风格/复盘报告/聊天记录均可按需读取
+        analysis = _execute_tool_loop(
+            msg_context,
+            llm_cfg,
+            tools=_get_tools() + get_review_tools(),
         )
     except Exception as e:
         _print(f"  ❌ 分析失败: {e}", style="red")
@@ -965,7 +1024,7 @@ def _do_review(contact_name: str, contact_wxid: str, llm_cfg: dict, config: dict
         "last_review_ts": max_ts,
         "last_review_time": datetime.now().isoformat(),
         "total_reviews": total_reviews + 1,
-        "last_summary": analysis[:1000],
+        "last_summary": analysis[:3000],
     }
     _save_review_state(contact_name, new_state)
 
