@@ -28,6 +28,7 @@ from agent.context import ContextBuilder
 from agent.memory import ContactMemory
 from agent.tools import dispatch as tool_dispatch
 from agent.tools._state import state
+from agent.tools.review import get_review_tools
 from agent.paths import context_json_path
 
 
@@ -107,15 +108,52 @@ def _print_help():
 
 # ===== 工具调用循环 =====
 
+_WEEKDAYS_CN = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+
+
+def _time_context_text() -> str:
+    """生成当前日期时间上下文片段，注入 system 提示词。
+
+    三个模式（自动/咨询/复盘）都要知道「现在是什么时候」，
+    避免 LLM 凭记忆瞎猜日期星期。
+    """
+    now = datetime.now()
+    return (
+        f"## 当前时间\n"
+        f"{now.strftime('%Y年%m月%d日 %H:%M')} {_WEEKDAYS_CN[now.weekday()]}。"
+        f"（今天是 {now.year}年{now.month}月{now.day}日，"
+        f"现在是 {now.strftime('%H:%M')}）\n"
+        f"涉及日期、时间、星期、节假日、时间差的判断，一律以此为准，不要凭记忆推测。"
+    )
+
+
+def _prepend_time_context(messages: list[dict]):
+    """在消息最前插入一条「当前时间」system 消息（已注入则跳过）。"""
+    for m in messages:
+        if m.get("role") == "system" and "## 当前时间" in m.get("content", ""):
+            return
+    messages.insert(0, {"role": "system", "content": _time_context_text()})
+
+
 def _execute_tool_loop(messages: list[dict], llm_cfg: dict,
-                       active_skills: list[str] = None) -> str:
+                       active_skills: list[str] = None,
+                       tools: list[dict] = None) -> str:
     """执行工具调用循环：LLM 返回 tool_calls → 执行 → 继续，直到返回文本。
     无轮数上限，LLM 可以持续调用工具直到产出文本回复。
+
+    Args:
+        messages: 对话消息
+        llm_cfg: LLM 配置
+        active_skills: 活跃技能
+        tools: 工具 schema 列表。不传则用内置工具 + 技能工具
 
     Returns:
         LLM 最终文本回复，或错误信息
     """
-    tools = _get_tools()
+    if tools is None:
+        tools = _get_tools()
+    # 注入当前日期时间，覆盖自动/咨询/回复跟进所有走工具循环的模式
+    _prepend_time_context(messages)
     round_num = 0
 
     while True:
@@ -629,6 +667,8 @@ def run_chat(config: dict):
                 for cm in chat_messages[-10:]:
                     msg_context.append(cm)
                 msg_context.append({"role": "user", "content": user_input})
+                # 咨询模式额外暴露复盘报告工具，便于回顾历史复盘
+                active_tools = _get_tools() + get_review_tools()
             else:
                 # 回复模式：完整上下文
                 msg_context = ctx_builder.build_context(
@@ -640,10 +680,11 @@ def run_chat(config: dict):
                     max_tokens=agent_cfg.get("context", {}).get("max_context_tokens", 8000),
                 )
                 msg_context.append({"role": "user", "content": user_input})
+                active_tools = None  # 用默认工具集（不含复盘报告工具）
 
             # LLM 工具调用循环
             with _console.status("[cyan]思考中...[/cyan]") if _console else contextlib.nullcontext():
-                reply = _execute_tool_loop(msg_context, llm_cfg, active_skills)
+                reply = _execute_tool_loop(msg_context, llm_cfg, active_skills, tools=active_tools)
 
             if reply:
                 if reply.startswith("[LLM 错误]") or reply.startswith("[系统]"):
@@ -717,6 +758,11 @@ COACH_SYSTEM_PROMPT = """你是 LearnLove Agent 的咨询教练模式。你不�
 - 给具体可操作的建议，不说空话
 - 可以质疑用户的想法，但保持尊重
 - 引用具体例子来说明观点
+
+## 工具与沉淀
+- 需要回顾历史复盘时，用 list_reviews 查看有哪些报告，read_review 读取内容
+- 讨论出对后续沟通有长期价值的原则、教训、行动方案时，用 record_lesson 记录（记得带 contact_name）。会自动沉淀到 lessons.json，后续聊天自动参考
+- 不要为记录而记录，只记真正有价值的发现
 
 ## 重要原则
 - 用户利益优先：情绪稳定、自尊、边界、长期幸福
@@ -886,7 +932,7 @@ def _do_review(contact_name: str, contact_wxid: str, llm_cfg: dict, config: dict
             f"(以上为上次复盘的关键结论，请结合上下文注意前后变化和趋势)"
         )
 
-    full_system = REVIEW_SYSTEM_PROMPT + previous_context + skill_context
+    full_system = _time_context_text() + "\n\n" + REVIEW_SYSTEM_PROMPT + previous_context + skill_context
 
     # ---- 10. 调用 LLM 分析 ----
     _print("  ▸ 分析中...", style="dim")

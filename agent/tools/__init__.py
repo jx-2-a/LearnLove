@@ -15,6 +15,7 @@ from agent.tools.message import get_chat_history, check_new_messages, search_mes
 from agent.tools.decode import decode_voice, batch_decode_voices, set_voice_mode
 from agent.tools.send import copy_to_clipboard, auto_send, check_wechat_window
 from agent.tools.monitor import _start_monitoring_raw, stop_monitoring, check_monitor_status
+from agent.tools.review import list_reviews, read_review
 from agent.protocol import ok
 
 
@@ -375,6 +376,9 @@ TOOL_MAP = {
     "read_file": _read_file_handler,
     # 时间
     "get_current_time": _get_current_time_handler,
+    # 复盘报告
+    "list_reviews": list_reviews,
+    "read_review": read_review,
     # 系统
     "view_output": _view_output_handler,
 }
