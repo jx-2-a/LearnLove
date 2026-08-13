@@ -250,6 +250,39 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "record_note",
+            "description": "记录一条「当时」的重要内容留档（per-contact，无活动联系人时落「自己」）。用户讲述重要事件/感受、讨论出有价值的想法/做法/结论、或一起创造了什么、想记住某刻原貌时用。只保存真正有价值的内容，不为记录而记录。与 record_lesson 不同：lesson 是每次聊天自动注入的短教训；note 是时间点快照，按需读取、不被压缩、不会被自动注入",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "简短标题，如「周五她说最近很累」「想法的转折点」"},
+                    "content": {"type": "string", "description": "完整内容：发生了什么、当时的想法/感受、或一起得出的结论/创造物"},
+                    "contact_name": {"type": "string", "description": "关联的联系人名称。默认当前联系人"},
+                },
+                "required": ["content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "view_notes",
+            "description": "按需读取该联系人的内容留档（历史时间点快照，最新在前，带日期）。这些是当时那一刻的原貌，不代表现在的状态——用户想找回过去的记忆/想法/结论时、或当前话题明确关联某段过往时用它回溯，不要据此推断当下。可按 keyword 搜索",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "contact_name": {"type": "string", "description": "联系人名称。默认当前联系人"},
+                    "limit": {"type": "integer", "description": "返回最近几条，默认 10"},
+                    "max_chars": {"type": "integer", "description": "返回内容总字符上限，默认 4000"},
+                    "keyword": {"type": "string", "description": "按标题/内容中的关键词过滤"},
+                },
+                "required": [],
+            },
+        },
+    },
     # ---- 表达翻译 ----
     {
         "type": "function",

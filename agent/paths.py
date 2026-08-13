@@ -12,7 +12,7 @@
 目录结构:
     {USER_DATA_DIR}/
       config.yaml
-      memory/{name}/     memory.md, transcript.jsonl, archive/, style.md, lessons.json
+      memory/{name}/     memory.md, transcript.jsonl, archive/, style.md, lessons.json, notes.json
       styles/            user_style.md, user_style_meta.json
       spills/            溢出输出
       reviews/           复盘报告
@@ -73,6 +73,11 @@ def contact_style_path(name: str) -> str:
 
 def lessons_path(name: str) -> str:
     return os.path.join(memory_dir(name), "lessons.json")
+
+
+def notes_path(name: str) -> str:
+    """重要内容留档（时间点快照，按需读取，永不注入）。"""
+    return os.path.join(memory_dir(name), "notes.json")
 
 
 def styles_dir() -> str:

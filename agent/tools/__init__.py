@@ -72,6 +72,78 @@ def _list_lessons_handler(contact_name: str = "") -> dict:
     return {"ok": True, "data": {"contact": name, "lessons": []}}
 
 
+def _record_note_handler(title: str = "", content: str = "", contact_name: str = "") -> dict:
+    """留档一条「当时」的重要内容（时间点快照，永不压缩、不自动注入）。
+
+    无活动联系人时落到固定桶「自己」，保证纯咨询场景也能留档。
+    """
+    from agent.tools._state import state
+    from agent.paths import notes_path, memory_dir
+    name = contact_name or state.active_contact_name or "自己"
+    if not content or not content.strip():
+        return {"ok": False, "error": "内容不能为空"}
+    np = notes_path(name)
+    os.makedirs(memory_dir(name), exist_ok=True)
+    notes = []
+    if os.path.exists(np):
+        try:
+            with open(np, "r", encoding="utf-8") as f:
+                notes = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            notes = []
+    notes.append({
+        "id": str(len(notes) + 1),
+        "title": title,
+        "content": content,
+        "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    })
+    with open(np, "w", encoding="utf-8") as f:
+        json.dump(notes, f, ensure_ascii=False, indent=2)
+    return {"ok": True, "data": {"recorded": title or content[:30], "contact": name, "count": len(notes)}}
+
+
+def _view_notes_handler(contact_name: str = "", limit: int = 10,
+                        max_chars: int = 4000, keyword: str = "") -> dict:
+    """按需读取内容留档：倒序（最新在前）、带日期、可按 keyword 搜索、可截断。"""
+    from agent.tools._state import state
+    from agent.paths import notes_path
+    name = contact_name or state.active_contact_name or "自己"
+    np = notes_path(name)
+    notes = []
+    if os.path.exists(np):
+        try:
+            with open(np, "r", encoding="utf-8") as f:
+                notes = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            notes = []
+    if not notes:
+        return {"ok": True, "data": {"contact": name, "notes": [], "count": 0, "total": 0}}
+    if keyword:
+        kw = keyword.strip().lower()
+        notes = [n for n in notes if kw in (n.get("title", "") + n.get("content", "")).lower()]
+    total = len(notes)
+    selected = notes[-limit:][::-1]  # 最新在前
+    result = []
+    budget = 0
+    for n in selected:
+        entry = {
+            "id": n.get("id", ""),
+            "title": n.get("title", ""),
+            "content": n.get("content", ""),
+            "date": n.get("date", ""),
+        }
+        remain = max_chars - budget
+        if remain <= 0:
+            break
+        if len(entry["content"]) > remain:
+            entry["content"] = entry["content"][:remain] + "..."
+            result.append(entry)
+            break
+        result.append(entry)
+        budget += len(entry["content"])
+    return {"ok": True, "data": {"contact": name, "notes": result, "count": len(result), "total": total}}
+
+
 def _express_translate_handler(meaning: str, tone: str = "warm",
                                context_note: str = "") -> dict:
     from agent.tools.expression import express_translate
@@ -360,6 +432,9 @@ TOOL_MAP = {
     "view_memory": _view_memory_handler,
     "record_lesson": _record_lesson_handler,
     "list_lessons": _list_lessons_handler,
+    # 留档（时间点快照，按需读取）
+    "record_note": _record_note_handler,
+    "view_notes": _view_notes_handler,
     # 表达翻译
     "express_translate": _express_translate_handler,
     # 技能管理

@@ -84,6 +84,8 @@ def _print_help():
 | `/voice <auto|manual>` | 切换语音处理模式 |
 | `/contact <名称>` | 切换当前联系人 |
 | `/memory` | 查看当前联系人的长期记忆 |
+| `/save <内容>` | 把重要内容留档（时间点快照，之后可找回来） |
+| `/notes [关键词]` | 查看/搜索留档（含日期） |
 | `/skills` | 查看活跃技能 |
 | `/clear` | 清除对话历史 |
 | `/h`, `/help` | 显示此帮助 |
@@ -763,6 +765,7 @@ COACH_SYSTEM_PROMPT = """你是 LearnLove Agent 的咨询教练模式。你不�
 ## 工具与沉淀
 - 需要回顾历史复盘时，用 list_reviews 查看有哪些报告，read_review 读取内容
 - 讨论出对后续沟通有长期价值的原则、教训、行动方案时，用 record_lesson 记录（记得带 contact_name）。会自动沉淀到 lessons.json，后续聊天自动参考
+- 讨论中产生的重要内容（故事/感受/想法/做法/一起创造的东西）想留档时，用 record_note 记录（带 contact_name，无活动联系人会落「自己」）。note 是时间点快照，不被自动注入——用户想找回过去时用 view_notes 按需读取
 - 不要为记录而记录，只记真正有价值的发现
 
 ## 重要原则
@@ -1149,6 +1152,37 @@ def _handle_slash(command: str, config: dict, contact_name: str,
                 _print("  尚无记忆，开始对话后会自动积累", style="yellow")
         else:
             _print("  未设置活跃联系人", style="yellow")
+
+    elif cmd == "/save":
+        if len(parts) < 2:
+            _print("  用法: /save <内容>  — 把重要内容留档（时间点快照，之后可找回来）", style="yellow")
+        else:
+            from agent.tools.__init__ import _record_note_handler
+            content = " ".join(parts[1:])
+            result = _record_note_handler(content=content, contact_name=contact_name)
+            if result.get("ok"):
+                data = result["data"]
+                _print(f"  📌 已留档 ({data['contact']})，共 {data['count']} 条", style="green")
+            else:
+                _print(f"  ❌ {result.get('error')}", style="red")
+
+    elif cmd == "/notes":
+        from agent.tools.__init__ import _view_notes_handler
+        keyword = " ".join(parts[1:]) if len(parts) > 1 else ""
+        result = _view_notes_handler(contact_name=contact_name, keyword=keyword)
+        if result.get("ok"):
+            data = result["data"]
+            notes = data.get("notes", [])
+            if not notes:
+                _print(f"  没有留档记录（共 {data.get('total', 0)} 条匹配）。用 /save 或让 AI record_note 留档", style="yellow")
+            else:
+                _print(f"\n  📌 留档 ({data['contact']}) — 显示 {data.get('count', len(notes))} 条，共 {data.get('total', 0)} 条:", style="cyan")
+                for n in notes:
+                    title = n.get("title") or "(无标题)"
+                    _print(f"\n  [{n.get('date', '')}] {title}", style="bold")
+                    _print(f"    {n.get('content', '')[:200]}", style="dim")
+        else:
+            _print(f"  ❌ {result.get('error')}", style="red")
 
     elif cmd == "/skills":
         active = config.get("active_skills", [])
