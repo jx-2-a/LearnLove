@@ -168,6 +168,8 @@ def _execute_tool_loop(messages: list[dict], llm_cfg: dict,
             model=llm_cfg.get("model", ""),
             temperature=llm_cfg.get("temperature", 0.7),
             max_tokens=llm_cfg.get("max_tokens", 4096),
+            provider=llm_cfg.get("provider", ""),
+            thinking=llm_cfg.get("thinking", False),
         )
 
         if result["type"] == "text":
@@ -193,6 +195,10 @@ def _execute_tool_loop(messages: list[dict], llm_cfg: dict,
                     for c in result["calls"]
                 ],
             }
+            # 思考模式下工具调用轮需回传 reasoning_content（DeepSeek 要求）
+            rc = result.get("reasoning_content", "")
+            if rc:
+                assistant_msg["reasoning_content"] = rc
             messages.append(assistant_msg)
 
             # 串行执行每个工具调用

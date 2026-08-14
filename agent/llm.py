@@ -541,7 +541,8 @@ def _get_tools():
 
 
 def chat(messages, tools=None, api_base="", api_key="", model="",
-         temperature=0.7, max_tokens=4096):
+         temperature=0.7, max_tokens=4096,
+         provider="", thinking=False):
     """调用 OpenAI 兼容 API，支持函数调用。
 
     Parameters
@@ -556,6 +557,12 @@ def chat(messages, tools=None, api_base="", api_key="", model="",
         输出随机性 0.0–2.0（默认 0.7，聊天建议需适度创造性）
     max_tokens : int
         单次回复最大输出 token 数（默认 4096）
+    provider : str
+        API 提供商（deepseek/openai/custom）。DeepSeek 思考模式默认开启，
+        仅对 deepseek 显式下发 thinking 参数，避免 openai/custom 因未知字段报错
+    thinking : bool
+        DeepSeek 思考模式开关，默认关闭。开启时不支持 temperature 参数
+        （会被 API 忽略），且工具调用轮需回传 reasoning_content
 
     Returns
     -------
@@ -576,6 +583,10 @@ def chat(messages, tools=None, api_base="", api_key="", model="",
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
+
+    # DeepSeek 思考模式默认开启；按配置显式关闭/开启（仅 deepseek 提供商）
+    if provider == "deepseek":
+        body["thinking"] = {"type": "enabled" if thinking else "disabled"}
 
     if tools:
         body["tools"] = tools
@@ -636,7 +647,11 @@ def chat(messages, tools=None, api_base="", api_key="", model="",
             except json.JSONDecodeError:
                 args = {}
             calls.append({"name": name, "args": args, "id": tc.get("id", "")})
-        return {"type": "tool_calls", "calls": calls}
+        return {
+            "type": "tool_calls",
+            "calls": calls,
+            "reasoning_content": message.get("reasoning_content", ""),
+        }
 
     # 纯文本
     content = message.get("content", "")
@@ -660,6 +675,8 @@ def chat_simple(user_message: str, system_prompt: str = "", config: dict = None)
         model=cfg.get("model", ""),
         temperature=cfg.get("temperature", 0.3),
         max_tokens=cfg.get("max_tokens", 4096),
+        provider=cfg.get("provider", ""),
+        thinking=cfg.get("thinking", False),
     )
     if result["type"] == "text":
         return result["content"]
