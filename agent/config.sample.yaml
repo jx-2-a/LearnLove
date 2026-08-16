@@ -24,6 +24,7 @@ llm:
   temperature: 0.7
   max_tokens: 4096
   thinking: false              # DeepSeek 思考模式开关（默认关闭）。开启时不支持 temperature，工具调用轮会额外消耗推理 token
+  reasoning_effort: high       # 思考强度: low | high | max（仅 thinking=true 时有效）
 
 # --- 必填: 监听的联系人 ---
 contacts:

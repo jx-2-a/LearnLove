@@ -542,7 +542,7 @@ def _get_tools():
 
 def chat(messages, tools=None, api_base="", api_key="", model="",
          temperature=0.7, max_tokens=4096,
-         provider="", thinking=False):
+         provider="", thinking=False, reasoning_effort=""):
     """调用 OpenAI 兼容 API，支持函数调用。
 
     Parameters
@@ -563,6 +563,8 @@ def chat(messages, tools=None, api_base="", api_key="", model="",
     thinking : bool
         DeepSeek 思考模式开关，默认关闭。开启时不支持 temperature 参数
         （会被 API 忽略），且工具调用轮需回传 reasoning_content
+    reasoning_effort : str
+        思考强度 low | high | max，仅 thinking=true 时下发（deepseek）
 
     Returns
     -------
@@ -587,6 +589,9 @@ def chat(messages, tools=None, api_base="", api_key="", model="",
     # DeepSeek 思考模式默认开启；按配置显式关闭/开启（仅 deepseek 提供商）
     if provider == "deepseek":
         body["thinking"] = {"type": "enabled" if thinking else "disabled"}
+        # 思考强度（仅 thinking=true 时下发，deepseek 支持 low/high/max）
+        if thinking and reasoning_effort:
+            body["reasoning_effort"] = reasoning_effort
 
     if tools:
         body["tools"] = tools
@@ -655,7 +660,232 @@ def chat(messages, tools=None, api_base="", api_key="", model="",
 
     # 纯文本
     content = message.get("content", "")
-    return {"type": "text", "content": content}
+    return {"type": "text", "content": content,
+            "reasoning_content": message.get("reasoning_content", "")}
+
+
+def chat_stream(messages, tools=None, api_base="", api_key="", model="",
+                temperature=0.7, max_tokens=4096,
+                provider="", thinking=False, reasoning_effort="", cancel=None):
+    """OpenAI 兼容 SSE 流式调用 — 生成器,边收边 yield。
+
+    与 chat() 相同参数（含 reasoning_effort 思考强度）,额外:
+    cancel : callable | None
+        每收一个 chunk 检查一次;返回 True 则中止并 yield {"type":"cancelled"}。
+
+    Yields
+    ------
+    dict:
+      {"type": "delta", "content": str}                        # 文本增量
+      {"type": "reasoning", "content": str}                    # 思考增量(DeepSeek thinking)
+      {"type": "done", "content": str, "reasoning_content": str}
+      {"type": "tool_calls", "calls": [...], "reasoning_content": str}
+      {"type": "error", "content": str}
+      {"type": "cancelled"}
+    收尾事件(done / tool_calls / error / cancelled)后生成器即结束。
+
+    重试:只在收到首字节前对连接类错误重试;已收到过 chunk 再断 → error,不重试部分输出。
+    """
+    url = api_base.rstrip("/") + "/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    body = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": True,   # 必须显式开流式,否则整包返回,thinking_delta/assistant_delta 全丢
+    }
+
+    # DeepSeek 思考模式:与 chat() 一致,仅 deepseek 提供商显式下发,避免 openai/custom 报错
+    if provider == "deepseek":
+        body["thinking"] = {"type": "enabled" if thinking else "disabled"}
+        # 思考强度(仅 thinking=true 时下发)
+        if thinking and reasoning_effort:
+            body["reasoning_effort"] = reasoning_effort
+
+    if tools:
+        body["tools"] = tools
+        body["tool_choice"] = "auto"
+
+    def _should_cancel():
+        if cancel is None:
+            return False
+        try:
+            return bool(cancel())
+        except Exception:
+            return False
+
+    last_error = None
+    received_any = False
+    for attempt in range(3):
+        if _should_cancel():
+            yield {"type": "cancelled"}
+            return
+        try:
+            with httpx.Client(
+                timeout=httpx.Timeout(connect=15.0, read=300.0, write=30.0, pool=15.0)
+            ) as client:
+                with client.stream("POST", url, headers=headers, json=body) as resp:
+                    try:
+                        resp.raise_for_status()
+                    except httpx.HTTPStatusError:
+                        # 流式响应未 read 时取 .text 会抛 ResponseNotRead:先缓冲 body 再报错
+                        resp.read()
+                        raise
+
+                    content_parts = []
+                    reasoning_parts = []
+                    tool_calls = {}       # index -> {id, name, arguments: []}
+                    finish = None
+                    saw_data = False       # 是否见过 SSE data 行
+                    raw_lines = []         # 非 data 行收集(整包 JSON 回退用)
+
+                    for line in resp.iter_lines():
+                        if _should_cancel():
+                            yield {"type": "cancelled"}
+                            return
+                        if not line:
+                            continue
+                        if not line.startswith("data:"):
+                            # 非 SSE 行先收集;若全程无 data 行,下面按整包 JSON 回退解析
+                            raw_lines.append(line)
+                            continue
+                        payload = line[5:].strip()
+                        if payload == "[DONE]":
+                            break
+                        saw_data = True
+                        try:
+                            chunk = json.loads(payload)
+                        except json.JSONDecodeError:
+                            continue
+                        received_any = True
+
+                        choices = chunk.get("choices") or []
+                        if not choices:
+                            continue
+                        choice = choices[0]
+                        if choice.get("finish_reason"):
+                            finish = choice["finish_reason"]
+                        delta = choice.get("delta") or {}
+
+                        # 文本增量
+                        if delta.get("content"):
+                            content_parts.append(delta["content"])
+                            yield {"type": "delta", "content": delta["content"]}
+
+                        # 思考增量(DeepSeek thinking;空串跳过,首片常为空)
+                        if delta.get("reasoning_content"):
+                            reasoning_parts.append(delta["reasoning_content"])
+                            yield {"type": "reasoning", "content": delta["reasoning_content"]}
+
+                        # tool_calls 碎片按 index 组装
+                        for tc in delta.get("tool_calls") or []:
+                            i = tc.get("index", 0)
+                            d = tool_calls.setdefault(i, {"id": "", "name": "", "arguments": []})
+                            if tc.get("id"):
+                                d["id"] = tc["id"]
+                            fn = tc.get("function") or {}
+                            if fn.get("name"):
+                                d["name"] = fn["name"]
+                            if fn.get("arguments"):
+                                d["arguments"].append(fn["arguments"])
+
+                    # 非 SSE 响应(代理/网关把流式吞成整包,或服务端直接返回普通 JSON):
+                    # 按 chat() 的方式整包解析,避免静默产出空 done 导致界面"什么都没显示"
+                    if not saw_data:
+                        if raw_lines:
+                            received_any = True
+                            body_text = "\n".join(raw_lines).strip()
+                            try:
+                                data = json.loads(body_text)
+                            except json.JSONDecodeError:
+                                yield {"type": "error",
+                                       "content": f"LLM 响应既非 SSE 也非 JSON(前 200 字符): {body_text[:200]}"}
+                                return
+                            choice = (data.get("choices") or [{}])[0]
+                            message = choice.get("message") or {}
+                            reasoning = message.get("reasoning_content") or ""
+                            if reasoning:
+                                yield {"type": "reasoning", "content": reasoning}
+                            if message.get("tool_calls"):
+                                calls = []
+                                for tc in message["tool_calls"]:
+                                    func = tc.get("function", {})
+                                    name = func.get("name", "")
+                                    try:
+                                        args = json.loads(func.get("arguments", "{}"))
+                                    except json.JSONDecodeError:
+                                        args = {}
+                                    calls.append({"name": name, "args": args, "id": tc.get("id", "")})
+                                yield {"type": "tool_calls", "calls": calls,
+                                       "reasoning_content": reasoning}
+                            else:
+                                content = message.get("content") or ""
+                                if content:
+                                    yield {"type": "delta", "content": content}
+                                yield {"type": "done", "content": content,
+                                       "reasoning_content": reasoning}
+                            return
+                        # 空响应:不能静默当成功
+                        yield {"type": "error", "content": "LLM 返回空响应(无 SSE 数据)"}
+                        return
+
+                    # 流结束:组装结果
+                    reasoning = "".join(reasoning_parts)
+                    if tool_calls or finish == "tool_calls":
+                        calls = []
+                        for i in sorted(tool_calls):
+                            d = tool_calls[i]
+                            try:
+                                args = json.loads("".join(d["arguments"]))
+                            except json.JSONDecodeError:
+                                args = {}   # 容错:退空 dict,与 chat() 一致
+                            calls.append({"name": d["name"], "args": args, "id": d["id"]})
+                        yield {"type": "tool_calls", "calls": calls,
+                               "reasoning_content": reasoning}
+                    else:
+                        yield {"type": "done", "content": "".join(content_parts),
+                               "reasoning_content": reasoning}
+                    return
+
+        except httpx.ReadTimeout:
+            last_error = "LLM 读取超时 (300s)"
+            if received_any or attempt >= 2:
+                break
+            time.sleep(2 ** attempt)
+        except httpx.ConnectTimeout:
+            last_error = "LLM 连接超时 (15s) — 请检查网络或 API 地址"
+            if received_any or attempt >= 2:
+                break
+            time.sleep(2 ** attempt)
+        except httpx.RemoteProtocolError:
+            last_error = "LLM 连接被服务端关闭"
+            if received_any or attempt >= 2:
+                break
+            time.sleep(2 ** attempt)
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            if status in (502, 503, 504) and attempt < 2 and not received_any:
+                last_error = f"API 错误 ({status}),正在重试..."
+                time.sleep(2 ** attempt)
+            else:
+                yield {"type": "error",
+                       "content": f"API 错误 ({status}): {e.response.text[:300]}"}
+                return
+        except httpx.RequestError as e:
+            last_error = f"网络错误: {e}"
+            if received_any or attempt >= 2:
+                break
+            time.sleep(2 ** attempt)
+        except Exception as e:
+            yield {"type": "error", "content": str(e)}
+            return
+
+    yield {"type": "error", "content": last_error or "LLM 请求失败(已重试 3 次)"}
 
 
 def chat_simple(user_message: str, system_prompt: str = "", config: dict = None) -> str:
@@ -677,6 +907,7 @@ def chat_simple(user_message: str, system_prompt: str = "", config: dict = None)
         max_tokens=cfg.get("max_tokens", 4096),
         provider=cfg.get("provider", ""),
         thinking=cfg.get("thinking", False),
+        reasoning_effort=cfg.get("reasoning_effort", ""),
     )
     if result["type"] == "text":
         return result["content"]

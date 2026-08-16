@@ -23,13 +23,23 @@ from datetime import datetime
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 from agent.protocol import ok, err
-from agent.llm import chat as llm_chat, _get_tools
+from agent.llm import chat as llm_chat, chat_stream, _get_tools
 from agent.context import ContextBuilder
 from agent.memory import ContactMemory
 from agent.tools import dispatch as tool_dispatch
 from agent.tools._state import state
 from agent.tools.review import get_review_tools
 from agent.paths import context_json_path
+
+# Windows GBK 控制台 + 中文/emoji 输出会崩（UnicodeEncodeError，坑 #15）：
+# 控制台实际渲染 UTF-8（Windows 10+ 终端）时，强制 Python stdout/stderr 用 UTF-8，
+# 否则 gbk 编不了 • 项目符号 / emoji。
+if os.name == 'nt':
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding='utf-8', errors='replace')
+        except (AttributeError, ValueError):
+            pass  # stdout 被重定向/替换（如 Web 模式捕获）时跳过
 
 
 # ===== Rich 终端 =====
@@ -50,15 +60,66 @@ def _setup_console():
 
 _console = _setup_console()
 
+# 活动会话（agentweb.WebSessionClient）。Web 模式由 agent/web.py 注入；None = 终端模式。
+# 所有 I/O（打印/输入/工具卡/思考块/状态行）经此分发，仿 Emisinver 的模式。
+_session = None
+
+# 网页设置面板热重载的运行时参数（model/thinking/temperature/max_tokens）。
+# 由 web.py 的 on_setting 写入，_effective_llm_cfg 合并覆盖到每次 LLM 调用。
+_RUNTIME = {}
+
+
+def _log(text, level="info"):
+    """发送一条系统提示，带等级（info|important|welcome|hint），Web 一段一气泡。"""
+    if _session is not None:
+        _session.log(text, level=level)
+    else:
+        _print(text)
+
+
+def _md(text):
+    """rich Markdown 对象 → SDK 展平为源 markdown（网页端渲染，[..] 不被当样式吃掉）。"""
+    from rich.markdown import Markdown
+    return Markdown(text)
+
+
+def _effective_llm_cfg(llm_cfg: dict) -> dict:
+    """网页设置面板热重载的值覆盖传入配置（未改时原样返回）。"""
+    if not _RUNTIME:
+        return llm_cfg
+    cfg = dict(llm_cfg)
+    for k in ("model", "thinking", "temperature", "max_tokens", "reasoning_effort"):
+        if k in _RUNTIME and _RUNTIME[k] is not None:
+            cfg[k] = _RUNTIME[k]
+    return cfg
+
+
+def _user_input(prompt: str):
+    """终端模式读取一行用户输入（Web 模式走非阻塞 poll_guidance，不走这里）。
+    EOF 返回 None，Ctrl+C 抛出交给外层处理。"""
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        return None
+    except KeyboardInterrupt:
+        raise
+
 
 def _print(text: str, style: str = ""):
-    """安全打印"""
-    if _console:
-        if style:
-            _console.print(text, style=style)
+    """安全打印。Web 模式下走 _session.render（info 气泡），终端模式走 Rich。
+    任何编码（如 Windows GBK 控制台编不了 Rich 渲染的 •）都兜底为纯文本。"""
+    if _session is not None:
+        _session.render(text if text is not None else "")
+        return
+    try:
+        if _console:
+            if style:
+                _console.print(text, style=style)
+            else:
+                _console.print(text)
         else:
-            _console.print(text)
-    else:
+            print(text)
+    except UnicodeEncodeError:
         try:
             print(text)
         except UnicodeEncodeError:
@@ -101,11 +162,17 @@ def _print_help():
 - "帮我看看有没有新消息"
 - "查一下和她的最近聊天"
 """
-    if _console:
-        from rich.markdown import Markdown
-        _console.print(Markdown(help_text))
-    else:
-        print(help_text)
+    if _session is not None:
+        # Web 模式：整段作为一条 info 气泡上屏。纯文本不经 Rich 渲染，避免 • 编码问题。
+        _session.log(help_text, level="info")
+        return
+    # 终端纯文本输出：Rich Markdown 渲染会把 `- ` 列表转成 • 项目符号，Windows GBK 控制台
+    # 编不了会崩（坑 #15）。直接逐行安全打印，不引入任何编码难字符。
+    for line in help_text.splitlines():
+        try:
+            print(line)
+        except UnicodeEncodeError:
+            print(line.encode('ascii', errors='replace').decode('ascii'))
 
 
 # ===== 工具调用循环 =====
@@ -151,32 +218,52 @@ def _execute_tool_loop(messages: list[dict], llm_cfg: dict,
 
     Returns:
         LLM 最终文本回复，或错误信息
+
+    Web 模式（_session 非 None）：
+      - 流式输出 / 可折叠思考块 / 工具卡 / 状态行实时上屏（chat_stream）
+      - 工具执行间隙 poll_guidance 收集引导，整批结束后统一注入（不拆散 tool_calls，防 400）
+      - 打断（pop_interrupt）中止循环，未回应的 tool_call 兜底补消息
+      - 重复工具调用检测：同 (name,args) 连续 5 次提醒、10 次强断，不设轮数上限
     """
     if tools is None:
         tools = _get_tools()
     # 注入当前日期时间，覆盖自动/咨询/回复跟进所有走工具循环的模式
     _prepend_time_context(messages)
-    round_num = 0
 
-    while True:
-        round_num += 1
-        result = llm_chat(
+    # 重复工具调用检测状态（坑④）
+    _repeat_sig = None
+    _repeat_count = 0
+    _guidance = []        # 批循环期间收集的引导输入，整批结束后注入
+
+    def _call_llm():
+        """一次 LLM 调用。Web 模式流式上屏（思考/文本），终端模式静默。"""
+        cfg = _effective_llm_cfg(llm_cfg)   # 每次调用取最新设置面板热重载值
+        if _session is not None:
+            return _stream_llm_call(messages, tools, cfg)
+        return llm_chat(
             messages=messages,
             tools=tools,
-            api_base=llm_cfg.get("api_base", ""),
-            api_key=llm_cfg.get("api_key", ""),
-            model=llm_cfg.get("model", ""),
-            temperature=llm_cfg.get("temperature", 0.7),
-            max_tokens=llm_cfg.get("max_tokens", 4096),
-            provider=llm_cfg.get("provider", ""),
-            thinking=llm_cfg.get("thinking", False),
+            api_base=cfg.get("api_base", ""),
+            api_key=cfg.get("api_key", ""),
+            model=cfg.get("model", ""),
+            temperature=cfg.get("temperature", 0.7),
+            max_tokens=cfg.get("max_tokens", 4096),
+            provider=cfg.get("provider", ""),
+            thinking=cfg.get("thinking", False),
+            reasoning_effort=cfg.get("reasoning_effort", ""),
         )
+
+    while True:
+        result = _call_llm()
 
         if result["type"] == "text":
             return result["content"]
 
         elif result["type"] == "error":
             return f"[LLM 错误] {result['content']}"
+
+        elif result["type"] == "cancelled":
+            return "[系统] 已打断"
 
         elif result["type"] == "tool_calls":
             # 追加 assistant 消息（含 tool_calls）
@@ -201,19 +288,51 @@ def _execute_tool_loop(messages: list[dict], llm_cfg: dict,
                 assistant_msg["reasoning_content"] = rc
             messages.append(assistant_msg)
 
+            interrupted = False
             # 串行执行每个工具调用
             for call in result["calls"]:
                 tool_name = call["name"]
                 tool_args = call["args"]
                 call_id = call["id"]
 
-                _print(f"  🔧 {tool_name}({json.dumps(tool_args, ensure_ascii=False)[:80]})", style="dim")
+                # 重复调用检测：同 (name, args) 连续 5 次提醒、10 次强断（不设轮数上限）
+                sig = (tool_name, json.dumps(tool_args, ensure_ascii=False, sort_keys=True))
+                if sig == _repeat_sig:
+                    _repeat_count += 1
+                else:
+                    _repeat_sig = sig
+                    _repeat_count = 1
+                if _repeat_count == 5:
+                    _log("⚠️ 同一工具已连续调用 5 次，若无进展请停止并换思路。", level="hint")
+                if _repeat_count >= 10:
+                    _log("⚠️ 连续 10 次重复调用同一工具，已强制停止工具循环。", level="important")
+                    # 本批未回应的 tool_call 兜底补消息，避免悬空 tool_calls（坑⑤）
+                    for c in result["calls"]:
+                        if not any(m.get("tool_call_id") == c["id"] for m in messages if m["role"] == "tool"):
+                            messages.append({"role": "tool", "tool_call_id": c["id"],
+                                             "content": "已中断，未执行（重复调用强断）"})
+                    return "[系统] 检测到重复工具调用，已停止循环。请明确下一步"
+
+                if _session is not None:
+                    _session.tool_event("start", name=tool_name, args=tool_args)
+                else:
+                    _print(f"  🔧 {tool_name}({json.dumps(tool_args, ensure_ascii=False)[:80]})", style="dim")
 
                 # 执行
                 try:
                     tool_result = tool_dispatch(tool_name, **tool_args)
                 except Exception as e:
                     tool_result = err(f"工具执行异常: {e}")
+
+                if _session is not None:
+                    if tool_result.get("ok"):
+                        _session.tool_event(
+                            "end", name=tool_name, ok=True,
+                            summary=json.dumps(tool_result.get("data"), ensure_ascii=False, default=str)[:2000])
+                    else:
+                        _session.tool_event(
+                            "end", name=tool_name, ok=False,
+                            error=str(tool_result.get("error", "")))
 
                 # 格式化结果
                 result_text = json.dumps(tool_result, ensure_ascii=False)
@@ -231,6 +350,100 @@ def _execute_tool_loop(messages: list[dict], llm_cfg: dict,
                     "tool_call_id": call_id,
                     "content": result_text,
                 })
+
+                # 工具执行间隙：收集引导输入（只收集不打断，批结束后统一注入）；检查打断
+                if _session is not None:
+                    g = _session.poll_guidance()
+                    if g:
+                        _guidance.append(g)
+                    if _session.pop_interrupt():
+                        interrupted = True
+                        break
+
+            if interrupted:
+                # 兜底：批次内未回应的 tool_call 补 tool 消息，避免 "tool_calls must be
+                # followed by tool messages" 400（坑⑤）
+                for c in result["calls"]:
+                    if not any(m.get("tool_call_id") == c["id"] for m in messages if m["role"] == "tool"):
+                        messages.append({"role": "tool", "tool_call_id": c["id"],
+                                         "content": "已中断，未执行"})
+                _log("⏹ 已打断。", level="info")
+                return "[系统] 已打断"
+
+            # 整批结束：注入收集到的引导输入（下轮 LLM 一并响应，天然不拆散 tool_calls）
+            if _guidance:
+                for g in _guidance:
+                    messages.append({"role": "user", "content": g})
+                    if _session is not None:
+                        _session.user_message(g)   # 回显引导输入，前端可见
+                _guidance = []
+
+
+def _stream_llm_call(messages: list[dict], tools: list[dict] | None,
+                     cfg: dict) -> dict:
+    """Web 模式 LLM 调用：SSE 流式 → 思考块 / 文本增量实时上屏。
+
+    返回与 llm.chat() 同形状的 result dict：
+      {"type": "text", "content", "reasoning_content"}
+      {"type": "tool_calls", "calls", "reasoning_content"}
+      {"type": "error", "content"}
+      {"type": "cancelled"}
+    """
+    _session.set_status("思考中...")
+    result = None
+    content_parts = []
+    try:
+        for ev in chat_stream(
+            messages, tools=tools,
+            api_base=cfg.get("api_base", ""),
+            api_key=cfg.get("api_key", ""),
+            model=cfg.get("model", ""),
+            temperature=cfg.get("temperature", 0.7),
+            max_tokens=cfg.get("max_tokens", 4096),
+            provider=cfg.get("provider", ""),
+            thinking=cfg.get("thinking", False),
+            reasoning_effort=cfg.get("reasoning_effort", ""),
+            cancel=lambda: _session.pop_interrupt(),
+        ):
+            t = ev["type"]
+            if t == "delta":
+                content_parts.append(ev["content"])
+                _session.stream_delta(ev["content"])
+            elif t == "reasoning":
+                _session.thinking_delta(ev["content"])
+            elif t == "tool_calls":
+                _session.thinking_end()      # 思考结束，关闭思考块再执行工具
+                result = ev
+                preamble = "".join(content_parts).strip()
+                if preamble:
+                    # 工具轮里 LLM 先说的正文 → markdown 收尾成一条消息
+                    _session.stream_end(_md(preamble))
+                else:
+                    _session.stream_end(None)   # 无正文 → 不产出消息
+            elif t == "done":
+                _session.thinking_end()
+                content = ev.get("content") or ""
+                if content:
+                    _session.stream_end(_md(content))
+                else:
+                    _session.stream_end(None)
+                result = {"type": "text", "content": content,
+                          "reasoning_content": ev.get("reasoning_content", "")}
+            elif t == "error":
+                _session.thinking_end()
+                result = ev
+                _session.stream_end(None)
+            elif t == "cancelled":
+                _session.thinking_end()
+                result = ev
+                _session.stream_end(None)
+            if result is not None:
+                break
+    finally:
+        _session.set_status("")
+    if result is None:
+        result = {"type": "error", "content": "LLM 流式响应为空"}
+    return result
 
 
 # ===== 自动模式 =====
@@ -269,14 +482,20 @@ def _get_skill_modifiers() -> str:
 
 # ===== 主 REPL =====
 
-def run_chat(config: dict):
+def run_chat(config: dict, session=None):
     """主 REPL 入口
 
     1. 初始化状态（加载联系人、设置活跃联系人）
     2. 加载记忆
     3. 显示欢迎信息
     4. 进入交互循环
+
+    session : agentweb.WebSessionClient | None
+        Web 模式传入（由 agent/web.py 注入）；None = 终端模式。
+        注入后本函数所有 I/O 走网页（气泡/输入栏/工具卡/思考块）。
     """
+    global _session
+    _session = session
     llm_cfg = config.get("llm", {})
     contacts_cfg = config.get("contacts", [])
     memory_cfg = config.get("memory", {})
@@ -502,9 +721,11 @@ def run_chat(config: dict):
                         break  # 全是语音且跳过了
 
                 if reply and not reply.startswith("[系统]"):
-                    _print(f"\n  🤖 建议回复:", style="bold green")
-                    _print(f"  {reply}", style="green")
                     last_suggestion = reply
+                    # Web 模式回复已由 _execute_tool_loop 流式上屏（assistant 气泡），不重复打印
+                    if _session is None:
+                        _print(f"\n  🤖 建议回复:", style="bold green")
+                        _print(f"  {reply}", style="green")
 
                     # 自动复制到剪贴板
                     if agent_cfg.get("auto", {}).get("auto_copy", False):
@@ -539,12 +760,26 @@ def run_chat(config: dict):
                 continue  # 处理完自动新消息后继续循环
 
             # 获取用户输入
-            if state.monitor_running:
+            prompt = "咨询 > " if coach_mode else "你 > "
+            if _session is not None:
+                # Web 模式：非阻塞轮询引导输入（输入栏随时可提交），不阻塞监控队列。
+                # pop_interrupt 消费打断标志——打断在流式/工具循环里已消费，这里兜底防残留，
+                # 避免点「打断」误杀整个会话（区别于终端 EOF）。
+                _session.pop_interrupt()
+                if state.monitor_queue and not state.monitor_queue.empty():
+                    continue          # 有新消息 → 回到顶部 drain+处理
+                user_input = _session.poll_guidance()
+                if user_input is None:
+                    time.sleep(0.5)   # 稍睡避免空转
+                    continue
+                # 回显用户输入：网页输入栏提交后不留痕，须补一笔 user 气泡（可重放，刷新后可见）
+                _session.user_message(user_input)
+            elif state.monitor_running:
                 # 自动模式：轮询等待输入，同时不阻塞监控队列
                 # 用 \r 保持在同行刷新，不堆空行
                 import msvcrt
                 user_input = None
-                p = "咨询 > " if coach_mode else "你 > "
+                p = prompt
                 for i in range(40):  # 最多等 20 秒（40 × 0.5s）
                     if i == 0:
                         sys.stdout.write(f"\r{p}")
@@ -574,11 +809,9 @@ def run_chat(config: dict):
                 if user_input is None:
                     continue
             else:
-                try:
-                    prompt = "咨询 > " if coach_mode else "你 > "
-                    user_input = input(prompt).strip()
-                except (EOFError, KeyboardInterrupt):
-                    break
+                user_input = _user_input(prompt)
+                if user_input is None:
+                    break  # 终端 EOF
 
             if not user_input:
                 continue
@@ -697,10 +930,12 @@ def run_chat(config: dict):
 
             if reply:
                 if reply.startswith("[LLM 错误]") or reply.startswith("[系统]"):
-                    _print(f"  ❌ {reply}", style="red")
+                    _log(f"❌ {reply}", level="important")
                 else:
-                    _print(f"\n  🤖 {reply}\n", style="green")
                     last_suggestion = reply
+                    # Web 模式回复已由 _execute_tool_loop 流式上屏，不重复打印
+                    if _session is None:
+                        _print(f"\n  🤖 {reply}\n", style="green")
 
             # 更新聊天消息
             chat_messages.append({"role": "user", "content": user_input})
@@ -749,6 +984,7 @@ def run_chat(config: dict):
     if contact_name and chat_messages:
         _save_context(contact_name, chat_messages)
 
+    _session = None   # 归还全局：本次会话的 _session 生命周期到此结束
     _print("  👋 再见!", style="cyan")
 
 
@@ -1019,14 +1255,22 @@ def _do_review(contact_name: str, contact_wxid: str, llm_cfg: dict, config: dict
         return None
 
     # ---- 11. 输出分析结果 ----
-    _print(f"\n{'─' * 50}", style="dim")
-    _print(f"  📊 {contact_name} — 对话复盘分析", style="bold cyan")
-    _print(f"  📅 {time_range}", style="dim")
-    if total_reviews > 0:
-        _print(f"  📝 第 {total_reviews + 1} 次复盘", style="dim")
-    _print(f"{'─' * 50}", style="dim")
-    _print(analysis)
-    _print(f"{'─' * 50}\n", style="dim")
+    if _session is not None:
+        # Web 模式：分析正文已由 _execute_tool_loop 流式上屏，这里只补一条汇总头
+        _log(
+            f"📊 {contact_name} — 对话复盘分析  📅 {time_range}"
+            + (f"  （第 {total_reviews + 1} 次复盘）" if total_reviews > 0 else ""),
+            level="important",
+        )
+    else:
+        _print(f"\n{'─' * 50}", style="dim")
+        _print(f"  📊 {contact_name} — 对话复盘分析", style="bold cyan")
+        _print(f"  📅 {time_range}", style="dim")
+        if total_reviews > 0:
+            _print(f"  📝 第 {total_reviews + 1} 次复盘", style="dim")
+        _print(f"{'─' * 50}", style="dim")
+        _print(analysis)
+        _print(f"{'─' * 50}\n", style="dim")
 
     # ---- 12. 保存复盘进度 ----
     new_state = {
