@@ -142,7 +142,7 @@ def _migrate_old_data():
 
 
 def load_config(config_path: str) -> dict:
-    """加载 config.yaml，解析相对路径"""
+    """加载 config.yaml，解析相对路径与模型档案。"""
     import yaml
     with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
@@ -155,6 +155,10 @@ def load_config(config_path: str) -> dict:
                 wechat[key] = os.path.expanduser(wechat[key])
                 if not os.path.isabs(wechat[key]):
                     wechat[key] = os.path.join(PROJECT_ROOT, wechat[key])
+
+    # 终端和 Web 共用同一份模型目录；旧式 provider/model/api_base 配置仍可覆盖档案。
+    from agent.model_registry import resolve_llm_config
+    config["llm"] = resolve_llm_config(config.get("llm", {}))
 
     return config
 

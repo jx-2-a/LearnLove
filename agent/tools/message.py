@@ -52,6 +52,25 @@ def _parse_date(date_str: str) -> tuple[float, float]:
         return (target.timestamp(),
                 target.replace(hour=23, minute=59, second=59).timestamp())
 
+    # 中文年月: '2024年6月' / '2024年06月' → 当月 1 号 ~ 月末
+    ym_match = re.match(r'(\d{4})\s*年\s*(\d{1,2})\s*月', s)
+    if ym_match:
+        y, m = int(ym_match.group(1)), int(ym_match.group(2))
+        if not (1 <= m <= 12):
+            raise ValueError(f"无效月份: {m}")
+        start = datetime(y, m, 1)
+        end = datetime(y, 12, 31) if m == 12 else datetime(y, m + 1, 1) - timedelta(days=1)
+        return (start.timestamp(),
+                end.replace(hour=23, minute=59, second=59).timestamp())
+
+    # 中文年份: '2024年' → 整年
+    y_match = re.match(r'(\d{4})\s*年', s)
+    if y_match:
+        y = int(y_match.group(1))
+        start = datetime(y, 1, 1)
+        end = datetime(y, 12, 31, 23, 59, 59)
+        return (start.timestamp(), end.timestamp())
+
     # 中文月日: '8月4日' 或 '8月4号'
     md_match = re.match(r'(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]?', s)
     if md_match:
@@ -62,6 +81,13 @@ def _parse_date(date_str: str) -> tuple[float, float]:
             target = datetime(now.year - 1, m, d)
         return (target.timestamp(),
                 target.replace(hour=23, minute=59, second=59).timestamp())
+
+    # 去年 / 前年 → 整年
+    if s in ('去年', '前年'):
+        y = now.year - (1 if s == '去年' else 2)
+        start = datetime(y, 1, 1)
+        end = datetime(y, 12, 31, 23, 59, 59)
+        return (start.timestamp(), end.timestamp())
 
     # 相对日期
     relative = {
@@ -87,7 +113,7 @@ def _parse_date(date_str: str) -> tuple[float, float]:
         return (target.timestamp(),
                 today_start.replace(hour=23, minute=59, second=59).timestamp())
 
-    raise ValueError(f"无法解析日期: {date_str!r}。支持格式: '2024-08-04', '8月4日', '今天', '昨天', '3天前'")
+    raise ValueError(f"无法解析日期: {date_str!r}。支持格式: '2024-08-04', '2024年6月', '2024年', '8月4日', '今天', '昨天', '去年', '3天前'")
 
 
 def _decode_text(content, ct: int) -> str:
@@ -174,19 +200,7 @@ def _parse_type49(xml_content: str) -> tuple[str, str]:
             if ref_type_m:
                 ref_type = ref_type_m.group(1)
 
-        # 构建引用摘要
-        ref_parts = []
-        ref_label = f"引用 {ref_dn}" if ref_dn else "引用"
-        if ref_content:
-            short = ref_content[:100] + ("..." if len(ref_content) > 100 else "")
-            ref_parts.append(f"[{ref_label}] {short}")
-        elif title:
-            # 有些版本把引用内容放在 appmsg 的 title/des 里
-            ref_parts.append(f"[{ref_label}] {title[:100]}")
-        else:
-            ref_parts.append(f"[{ref_label}]")
-
-        # 构建正文摘要
+        # 构建正文摘要（实际新发的消息内容）
         body_parts = []
         if title and ref_content:
             # title 是正文（不是引用内容）
@@ -198,24 +212,30 @@ def _parse_type49(xml_content: str) -> tuple[str, str]:
             if des and des != title:
                 body_parts.append(des[:120])
 
-        # 组合标签：引用 + body 类型
-        if body_is_finder:
-            type_label = "引用(引用)"
-        elif body_is_file:
-            type_label = "引用(文件)"
-        elif body_is_link:
-            type_label = "引用(链接)"
-        else:
-            type_label = "引用"
+        body_text = " — ".join(body_parts)
+        if not body_text and body_is_finder:
+            body_text = "引用分享"
 
-        # 组装最终摘要
-        summary_parts = ref_parts
-        if body_parts:
-            summary_parts.append("[正文] " + " — ".join(body_parts))
-        elif body_is_finder:
-            summary_parts.append("[正文: 引用分享]")
+        # 被引用内容只作短上下文（真正的对话是上面的正文）
+        ref_text = ""
+        if ref_content:
+            ref_text = ref_content
+        elif title and not body_parts:
+            # 有些版本把引用内容放在 appmsg 的 title/des 里
+            ref_text = title
+        # 引用内容是原始 msg-id（图片/表情被引用时形如 wxid_xxx:1719...::0），非文本不展示
+        if re.match(r'^\S+:\d+:\d+:[^:]*::\d+$', ref_text):
+            ref_text = ""
 
-        return (type_label, " | ".join(summary_parts))
+        # 组装最终摘要：正文在前，被引用内容降级为短尾巴
+        if body_text:
+            if ref_text:
+                short_ref = ref_text[:60] + ("..." if len(ref_text) > 60 else "")
+                return ("引用", f"{body_text} [引用: {short_ref}]")
+            return ("引用", body_text)
+        if ref_text:
+            return ("引用", f"[引用] {ref_text[:80]}")
+        return ("引用", f"[引用 {ref_dn}]" if ref_dn else "[引用]")
 
     # 文件类型（非引用）
     if body_is_file:
@@ -378,24 +398,31 @@ def _learn_sender_map(conn, table_name: str, wxid: str, display_name: str) -> di
     return sender_map
 
 
-def _get_sender_map(conn, table_name: str, wxid: str, display_name: str) -> dict:
+def _get_sender_map(conn, table_name: str, wxid: str, display_name: str,
+                    db_path: str = "") -> dict:
     """获取或学习 sender_map。学不到就返回空 map（由调用方按 sid=X 显示），
     不再假设 {1: 联系人, 2: 你}——那个假设在很多数据库中不成立。
     """
-    # 先尝试从缓存获取（用 None 哨兵区分"未缓存"和"缓存了但为空"）
-    cached = state.sender_maps.get(wxid, None)
+    # 按 (wxid, db_path) 分别缓存：不同 message_N.db 里的 real_sender_id 编码可能不同
+    #（如新库用 1/2，老库用 2/3），不能全局共用一个 map
+    key = (wxid, db_path)
+    cached = state.sender_maps.get(key, None)
     if cached is not None:
         return cached
 
     # 学习
     smap = _learn_sender_map(conn, table_name, wxid, display_name)
-    state.sender_maps[wxid] = smap  # 缓存结果（即便是空 map）
+    state.sender_maps[key] = smap  # 缓存结果（即便是空 map）
     return smap
 
 
 def _query_messages(conn, table_name: str, since_ts: float = 0,
-                    before_ts: float = None, limit: int = 50) -> list[dict]:
-    """查询消息，返回结构化列表。支持单独或组合时间范围。"""
+                    before_ts: float = None, limit: int = 50,
+                    oldest: bool = False) -> list[dict]:
+    """查询消息，返回结构化列表。支持单独或组合时间范围。
+
+    oldest=True 时按时间正序取最早 limit 条（查看相识初期等早期记录）。
+    """
     conditions = []
     params = []
 
@@ -408,31 +435,17 @@ def _query_messages(conn, table_name: str, since_ts: float = 0,
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
-    # 如果有上限时间无下限，倒序取最近的
-    if before_ts and not (since_ts > 0):
-        order = "ORDER BY create_time DESC"
-        params.append(limit)
-        sql = f"SELECT create_time, local_type, local_id, message_content, " \
-              f"WCDB_CT_message_content, real_sender_id " \
-              f"FROM [{table_name}] {where} {order} LIMIT ?"
-    elif since_ts > 0 and not before_ts:
-        order = "ORDER BY create_time ASC"
-        sql = f"SELECT create_time, local_type, local_id, message_content, " \
-              f"WCDB_CT_message_content, real_sender_id " \
-              f"FROM [{table_name}] {where} {order}"
-    elif since_ts > 0 and before_ts:
-        # 时间范围查询：正序，可限制条数
-        order = "ORDER BY create_time DESC"
-        params.append(limit)
-        sql = f"SELECT create_time, local_type, local_id, message_content, " \
-              f"WCDB_CT_message_content, real_sender_id " \
-              f"FROM [{table_name}] {where} {order} LIMIT ?"
+    select = f"SELECT create_time, local_type, local_id, message_content, " \
+             f"WCDB_CT_message_content, real_sender_id FROM [{table_name}]"
+
+    # check_new_messages 依赖：只给 since_ts 时正序拉全量（不设 LIMIT）
+    if since_ts > 0 and not before_ts and not oldest:
+        sql = f"{select} {where} ORDER BY create_time ASC"
     else:
-        order = "ORDER BY create_time DESC"
+        # 默认倒序取最近 limit 条；oldest=True 时正序取最早 limit 条
+        order = "ORDER BY create_time ASC" if oldest else "ORDER BY create_time DESC"
         params.append(limit)
-        sql = f"SELECT create_time, local_type, local_id, message_content, " \
-              f"WCDB_CT_message_content, real_sender_id " \
-              f"FROM [{table_name}] {order} LIMIT ?"
+        sql = f"{select} {where} {order} LIMIT ?"
 
     rows = conn.execute(sql, params).fetchall()
 
@@ -455,18 +468,21 @@ def _query_messages(conn, table_name: str, since_ts: float = 0,
 
 def get_chat_history(contact_name: str, limit: int = 30,
                      date: str = None, since_ts: float = None,
-                     before_ts: float = None) -> dict:
+                     before_ts: float = None, oldest: bool = False) -> dict:
     """获取与联系人的聊天记录
 
     Args:
         contact_name: 联系人名称
         limit: 返回消息条数，默认 30，最多 200
-        date: 人类可读日期，如 '2024-08-04', '8月4日', '今天', '昨天'
-              (自动转为当天 00:00–23:59 范围，覆盖 since_ts/before_ts)
+        date: 人类可读日期，如 '2024-08-04', '2024年6月', '2024年', '8月4日',
+              '今天', '昨天', '去年'
+              (自动转为当天/当月/当年 时间范围，覆盖 since_ts/before_ts)
         since_ts: Unix 时间戳，只返回此时间之后的消息
         before_ts: Unix 时间戳，只返回此时间之前的消息
+        oldest: 为 true 时返回最早的一批消息（默认倒序返回最近的消息）
 
-    Returns {ok, data: {messages: [{time_str, type, type_name, sender, content, voice_text}, ...]}}
+    Returns {ok, data: {messages: [{time_str, type, type_name, sender, content, voice_text}, ...],
+                        range: {earliest_ts, latest_ts, total, earliest, latest}}}
     """
     wxid, display = state.resolve_contact_exact(contact_name)
     if not wxid:
@@ -487,22 +503,46 @@ def get_chat_history(contact_name: str, limit: int = 30,
     if not tables:
         return err(f"未找到 {display} 的消息表")
 
+    now = datetime.now()
     all_msgs = []
+    range_min = None
+    range_max = None
+    range_total = 0
     for db_path, table_name in tables:
         try:
             conn = sqlite3.connect(db_path)
         except Exception:
             continue
 
-        sender_map = _get_sender_map(conn, table_name, wxid, display)
+        try:
+            # 统计该表的历史范围（尽早/最晚/总数），供调用方感知可查询的跨度
+            r = conn.execute(
+                f"SELECT MIN(create_time), MAX(create_time), COUNT(*) FROM [{table_name}]"
+            ).fetchone()
+            if r and r[2]:
+                range_total += r[2]
+                if r[0] is not None:
+                    range_min = r[0] if range_min is None else min(range_min, r[0])
+                if r[1] is not None:
+                    range_max = r[1] if range_max is None else max(range_max, r[1])
+        except Exception:
+            pass
+
+        sender_map = _get_sender_map(conn, table_name, wxid, display, db_path)
         msgs = _query_messages(conn, table_name,
                                since_ts=since_ts or 0,
                                before_ts=before_ts,
-                               limit=limit)
+                               limit=limit,
+                               oldest=oldest)
         conn.close()
 
         for m in msgs:
-            ts_str = datetime.fromtimestamp(m["create_time"]).strftime("%m-%d %H:%M")
+            # 跨年份时带上年份，避免早年记录与当年记录混淆
+            ts_dt = datetime.fromtimestamp(m["create_time"])
+            if ts_dt.year != now.year:
+                ts_str = ts_dt.strftime("%Y-%m-%d %H:%M")
+            else:
+                ts_str = ts_dt.strftime("%m-%d %H:%M")
             type_name, body = _format_message_body(m)
             sender = sender_map.get(m["sender_id"], f"sid={m['sender_id']}")
 
@@ -514,7 +554,7 @@ def get_chat_history(contact_name: str, limit: int = 30,
                 "content": clip(body, 500),
             })
 
-    # 去重 + 排序（默认倒序）
+    # 去重 + 排序（默认倒序取最近，oldest=True 正序取最早）
     seen = set()
     unique = []
     for m in all_msgs:
@@ -523,10 +563,22 @@ def get_chat_history(contact_name: str, limit: int = 30,
             seen.add(key)
             unique.append(m)
 
-    unique.sort(key=lambda m: m["create_time"], reverse=True)
+    unique.sort(key=lambda m: m["create_time"], reverse=not oldest)
     result = unique[:limit]
 
+    range_info = {}
+    if range_min is not None and range_max is not None:
+        range_info = {
+            "earliest_ts": range_min,
+            "latest_ts": range_max,
+            "total": range_total,
+            "earliest": datetime.fromtimestamp(range_min).strftime("%Y-%m-%d"),
+            "latest": datetime.fromtimestamp(range_max).strftime("%Y-%m-%d"),
+        }
+
     return ok({"contact": display, "messages": result, "count": len(result),
+               "oldest": oldest,
+               "range": range_info,
                "query": {"date": date, "since_ts": since_ts, "before_ts": before_ts}})
 
 
@@ -569,7 +621,7 @@ def check_new_messages(contact_name: str = None) -> dict:
             except Exception:
                 continue
 
-            smap = _get_sender_map(conn, table_name, wxid, display)
+            smap = _get_sender_map(conn, table_name, wxid, display, db_path)
             msgs = _query_messages(conn, table_name, since_ts=since_ts)
             conn.close()
 

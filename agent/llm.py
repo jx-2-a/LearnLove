@@ -2,7 +2,8 @@
 LLM 客户端 — OpenAI 兼容 API，支持函数调用。
 
 用户配置 (config.yaml llm 段):
-  provider: deepseek | openai | custom
+  provider: deepseek | tju | openai | custom
+  protocol: openai | tju
   model: 模型名
   api_base: API 地址
   api_key: API 密钥
@@ -48,6 +49,7 @@ SYSTEM_PROMPT_TEMPLATE = """你是 LearnLove Agent — 用户的微信聊天助�
 
 ## 工具使用注意事项
 - 查询消息前先确保解密已刷新
+- 聊天记录可能跨多年：get_chat_history 默认只返回最近一批，要看早期记录需用 date（如 '2024年6月'）或 oldest=true 参数
 - 语音消息如果标记为 [语音待转]，提醒用户手动转录
 - 发送功能需要相应阀门权限
 - 记忆操作（record_lesson等）适度使用，不要每条消息都记录"""
@@ -91,15 +93,16 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_chat_history",
-            "description": "获取与指定联系人的聊天记录。返回最近的消息列表（文字自动解码，语音标注类型）。支持按日期或时间范围查询",
+            "description": "获取与指定联系人的聊天记录（文字自动解码，语音标注类型）。默认返回最近的一批消息；历史可能跨多年，返回结果带 range 字段标明可查询的最早/最晚日期与总条数。要看更早或指定时期的记录，用 date 或 oldest 参数",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "contact_name": {"type": "string", "description": "联系人名称，输入你在 config.yaml 中配置的名称"},
                     "limit": {"type": "integer", "description": "返回消息条数，默认 30，最多 200"},
-                    "date": {"type": "string", "description": "日期查询，格式灵活: '2024-08-04', '8月4日', '今天', '昨天', '前天'。自动转换为当天的 00:00 到 23:59 范围"},
+                    "date": {"type": "string", "description": "日期查询，格式灵活: '2024-08-04', '2024年6月', '2024年', '8月4日', '今天', '昨天', '去年', '3天前'。自动转换为对应日期范围。查看早期记录时优先用这个"},
                     "since_ts": {"type": "number", "description": "只返回此时间戳之后的消息（Unix timestamp）。和 before_ts 同时使用做时间范围查询"},
                     "before_ts": {"type": "number", "description": "只返回此时间戳之前的消息（Unix timestamp）。和 since_ts 同时使用做时间范围查询"},
+                    "oldest": {"type": "boolean", "description": "为 true 时返回最早的一批消息（如相识初期的记录）。默认 false 返回最近的消息。注意 oldest 与 date 可组合使用"},
                 },
                 "required": ["contact_name"],
             },
@@ -540,9 +543,41 @@ def _get_tools():
         return TOOLS
 
 
+def _reasoning_text(data: dict) -> str:
+    """统一不同服务商的思考字段名。"""
+    return (data.get("reasoning_content")
+            or data.get("reasoning")
+            or data.get("thinking_content")
+            or "")
+
+
+def _prepare_messages(messages: list[dict], protocol: str) -> list[dict]:
+    """把内部统一消息转换为目标协议接受的字段。"""
+    if (protocol or "openai").lower() != "tju":
+        return messages
+    prepared = []
+    for message in messages:
+        item = dict(message)
+        if item.get("role") == "assistant" and item.get("reasoning_content"):
+            item["reasoning"] = item.pop("reasoning_content")
+        prepared.append(item)
+    return prepared
+
+
+def _apply_reasoning_options(body: dict, provider: str, protocol: str,
+                             thinking: bool, reasoning_effort: str):
+    """按服务商协议添加思考控制参数。"""
+    provider = (provider or "").lower()
+    protocol = (protocol or "openai").lower()
+    if provider == "deepseek" or protocol == "tju":
+        body["thinking"] = {"type": "enabled" if thinking else "disabled"}
+    if provider == "deepseek" and thinking and reasoning_effort:
+        body["reasoning_effort"] = reasoning_effort
+
+
 def chat(messages, tools=None, api_base="", api_key="", model="",
          temperature=0.7, max_tokens=4096,
-         provider="", thinking=False, reasoning_effort=""):
+         provider="", thinking=False, reasoning_effort="", protocol="openai"):
     """调用 OpenAI 兼容 API，支持函数调用。
 
     Parameters
@@ -565,6 +600,8 @@ def chat(messages, tools=None, api_base="", api_key="", model="",
         （会被 API 忽略），且工具调用轮需回传 reasoning_content
     reasoning_effort : str
         思考强度 low | high | max，仅 thinking=true 时下发（deepseek）
+    protocol : str
+        请求协议。TJU 使用 OpenAI 兼容请求，但思考字段为 reasoning
 
     Returns
     -------
@@ -579,19 +616,15 @@ def chat(messages, tools=None, api_base="", api_key="", model="",
         "Content-Type": "application/json",
     }
 
+    request_messages = _prepare_messages(messages, protocol)
     body = {
         "model": model,
-        "messages": messages,
+        "messages": request_messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
 
-    # DeepSeek 思考模式默认开启；按配置显式关闭/开启（仅 deepseek 提供商）
-    if provider == "deepseek":
-        body["thinking"] = {"type": "enabled" if thinking else "disabled"}
-        # 思考强度（仅 thinking=true 时下发，deepseek 支持 low/high/max）
-        if thinking and reasoning_effort:
-            body["reasoning_effort"] = reasoning_effort
+    _apply_reasoning_options(body, provider, protocol, thinking, reasoning_effort)
 
     if tools:
         body["tools"] = tools
@@ -640,6 +673,7 @@ def chat(messages, tools=None, api_base="", api_key="", model="",
 
     choice = data.get("choices", [{}])[0]
     message = choice.get("message", {})
+    reasoning = _reasoning_text(message)
 
     # 函数调用
     if message.get("tool_calls"):
@@ -655,18 +689,19 @@ def chat(messages, tools=None, api_base="", api_key="", model="",
         return {
             "type": "tool_calls",
             "calls": calls,
-            "reasoning_content": message.get("reasoning_content", ""),
+            "reasoning_content": reasoning,
         }
 
     # 纯文本
     content = message.get("content", "")
     return {"type": "text", "content": content,
-            "reasoning_content": message.get("reasoning_content", "")}
+            "reasoning_content": reasoning}
 
 
 def chat_stream(messages, tools=None, api_base="", api_key="", model="",
                 temperature=0.7, max_tokens=4096,
-                provider="", thinking=False, reasoning_effort="", cancel=None):
+                provider="", thinking=False, reasoning_effort="", cancel=None,
+                protocol="openai"):
     """OpenAI 兼容 SSE 流式调用 — 生成器,边收边 yield。
 
     与 chat() 相同参数（含 reasoning_effort 思考强度）,额外:
@@ -692,20 +727,16 @@ def chat_stream(messages, tools=None, api_base="", api_key="", model="",
         "Content-Type": "application/json",
     }
 
+    request_messages = _prepare_messages(messages, protocol)
     body = {
         "model": model,
-        "messages": messages,
+        "messages": request_messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
         "stream": True,   # 必须显式开流式,否则整包返回,thinking_delta/assistant_delta 全丢
     }
 
-    # DeepSeek 思考模式:与 chat() 一致,仅 deepseek 提供商显式下发,避免 openai/custom 报错
-    if provider == "deepseek":
-        body["thinking"] = {"type": "enabled" if thinking else "disabled"}
-        # 思考强度(仅 thinking=true 时下发)
-        if thinking and reasoning_effort:
-            body["reasoning_effort"] = reasoning_effort
+    _apply_reasoning_options(body, provider, protocol, thinking, reasoning_effort)
 
     if tools:
         body["tools"] = tools
@@ -777,10 +808,11 @@ def chat_stream(messages, tools=None, api_base="", api_key="", model="",
                             content_parts.append(delta["content"])
                             yield {"type": "delta", "content": delta["content"]}
 
-                        # 思考增量(DeepSeek thinking;空串跳过,首片常为空)
-                        if delta.get("reasoning_content"):
-                            reasoning_parts.append(delta["reasoning_content"])
-                            yield {"type": "reasoning", "content": delta["reasoning_content"]}
+                        # 思考增量：DeepSeek=reasoning_content，TJU Qwen=reasoning。
+                        reasoning_delta = _reasoning_text(delta)
+                        if reasoning_delta:
+                            reasoning_parts.append(reasoning_delta)
+                            yield {"type": "reasoning", "content": reasoning_delta}
 
                         # tool_calls 碎片按 index 组装
                         for tc in delta.get("tool_calls") or []:
@@ -808,7 +840,7 @@ def chat_stream(messages, tools=None, api_base="", api_key="", model="",
                                 return
                             choice = (data.get("choices") or [{}])[0]
                             message = choice.get("message") or {}
-                            reasoning = message.get("reasoning_content") or ""
+                            reasoning = _reasoning_text(message)
                             if reasoning:
                                 yield {"type": "reasoning", "content": reasoning}
                             if message.get("tool_calls"):
@@ -908,6 +940,7 @@ def chat_simple(user_message: str, system_prompt: str = "", config: dict = None)
         provider=cfg.get("provider", ""),
         thinking=cfg.get("thinking", False),
         reasoning_effort=cfg.get("reasoning_effort", ""),
+        protocol=cfg.get("protocol", "openai"),
     )
     if result["type"] == "text":
         return result["content"]

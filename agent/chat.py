@@ -64,7 +64,7 @@ _console = _setup_console()
 # 所有 I/O（打印/输入/工具卡/思考块/状态行）经此分发，仿 Emisinver 的模式。
 _session = None
 
-# 网页设置面板热重载的运行时参数（model/thinking/temperature/max_tokens）。
+# 网页设置面板热重载的运行时模型档案与生成参数。
 # 由 web.py 的 on_setting 写入，_effective_llm_cfg 合并覆盖到每次 LLM 调用。
 _RUNTIME = {}
 
@@ -88,7 +88,9 @@ def _effective_llm_cfg(llm_cfg: dict) -> dict:
     if not _RUNTIME:
         return llm_cfg
     cfg = dict(llm_cfg)
-    for k in ("model", "thinking", "temperature", "max_tokens", "reasoning_effort"):
+    for k in ("model_profile", "model", "provider", "protocol", "api_base", "api_key",
+              "thinking", "temperature", "max_tokens", "reasoning_effort",
+              "max_context_tokens"):
         if k in _RUNTIME and _RUNTIME[k] is not None:
             cfg[k] = _RUNTIME[k]
     return cfg
@@ -251,6 +253,7 @@ def _execute_tool_loop(messages: list[dict], llm_cfg: dict,
             provider=cfg.get("provider", ""),
             thinking=cfg.get("thinking", False),
             reasoning_effort=cfg.get("reasoning_effort", ""),
+            protocol=cfg.get("protocol", "openai"),
         )
 
     while True:
@@ -404,6 +407,7 @@ def _stream_llm_call(messages: list[dict], tools: list[dict] | None,
             thinking=cfg.get("thinking", False),
             reasoning_effort=cfg.get("reasoning_effort", ""),
             cancel=lambda: _session.pop_interrupt(),
+            protocol=cfg.get("protocol", "openai"),
         ):
             t = ev["type"]
             if t == "delta":
@@ -1140,6 +1144,10 @@ def _do_review(contact_name: str, contact_wxid: str, llm_cfg: dict, config: dict
     total_reviews = prev_state.get("total_reviews", 0) if prev_state else 0
 
     # ---- 3. 根据是否有历史记录决定查询策略 ----
+    include_oldest = review_cfg.get("include_oldest", True)
+    oldest_limit = review_cfg.get("oldest_message_limit", 50)
+
+    early_messages = []
     if last_review_ts is not None:
         result = get_chat_history(
             contact_name=contact_name,
@@ -1151,6 +1159,13 @@ def _do_review(contact_name: str, contact_wxid: str, llm_cfg: dict, config: dict
     else:
         result = get_chat_history(contact_name=contact_name, limit=initial_limit)
         _print(f"  📍 首次分析：拉取最近 {initial_limit} 条", style="dim")
+        # 首次复盘额外拉取最早的一批消息，覆盖"相识初期"
+        if include_oldest:
+            early = get_chat_history(contact_name=contact_name, oldest=True, limit=oldest_limit)
+            if early.get("ok"):
+                early_messages = early["data"].get("messages", [])
+            if early_messages:
+                _print(f"  📍 首次分析：另拉取最早 {len(early_messages)} 条（相识初期）", style="dim")
 
     if not result.get("ok"):
         _print(f"  ❌ 获取聊天记录失败: {result.get('error', '未知错误')}", style="red")
@@ -1164,17 +1179,38 @@ def _do_review(contact_name: str, contact_wxid: str, llm_cfg: dict, config: dict
             _print(f"  📭 暂无 {contact_name} 的聊天记录", style="yellow")
         return None
 
-    # ---- 4. 正序排列（按时间顺序，更符合复盘阅读习惯） ----
-    messages_asc = sorted(messages, key=lambda m: m["create_time"])
+    # ---- 4. 合并早期与最近记录（按 create_time 去重），时间正序 ----
+    early_ts = {m["create_time"] for m in early_messages}
+    by_ts = {}
+    for m in messages:
+        by_ts[m["create_time"]] = m
+    for m in early_messages:
+        by_ts.setdefault(m["create_time"], m)
+    messages_asc = sorted(by_ts.values(), key=lambda m: m["create_time"])
     min_ts = messages_asc[0]["create_time"]
     max_ts = messages_asc[-1]["create_time"]
 
-    # ---- 5. 检测是否达到拉取上限 ----
+    # ---- 5. 检测是否达到拉取上限（按最近段判断） ----
     hit_limit = len(messages) >= min(initial_limit, 200)
 
     # ---- 6. 格式化聊天记录 ----
+    now_year = datetime.now().year
+
+    def _fmt_review_time(ts):
+        dt = datetime.fromtimestamp(ts)
+        return dt.strftime("%Y-%m-%d %H:%M") if dt.year != now_year else dt.strftime("%m-%d %H:%M")
+
     lines = []
+    early_started = False
+    recent_started = False
     for m in messages_asc:
+        is_early = m["create_time"] in early_ts
+        if is_early and not early_started:
+            lines.append("──── 早期记录（相识初期）────")
+            early_started = True
+        elif not is_early and early_started and not recent_started:
+            lines.append("──── 最近记录 ────")
+            recent_started = True
         sender = m.get("sender", "?")
         content = m.get("content", "")
         t = m.get("time", "")
@@ -1185,17 +1221,14 @@ def _do_review(contact_name: str, contact_wxid: str, llm_cfg: dict, config: dict
         lines.append(f"[{t}] {sender}{type_tag}: {content}")
 
     chat_text = "\n".join(lines)
-    time_range = (
-        f"{datetime.fromtimestamp(min_ts).strftime('%m-%d %H:%M')} ~ "
-        f"{datetime.fromtimestamp(max_ts).strftime('%m-%d %H:%M')}"
-    )
-    _print(f"  📊 已加载 {len(messages)} 条消息（{time_range}），正在分析...", style="cyan")
+    time_range = f"{_fmt_review_time(min_ts)} ~ {_fmt_review_time(max_ts)}"
+    _print(f"  📊 已加载 {len(messages_asc)} 条消息（{time_range}，含早期 {len(early_messages)} 条），正在分析...", style="cyan")
 
     # ---- 7. 构建 user_prompt ----
     user_prompt = (
         f"## 联系人: {contact_name}\n"
         f"## 时间范围: {time_range}\n"
-        f"## 聊天记录（共 {len(messages)} 条）\n"
+        f"## 聊天记录（共 {len(messages_asc)} 条，其中「早期记录」为最早期的一批消息，用于了解相识阶段）\n"
         f"{chat_text}\n\n"
         f"请对以上对话进行复盘分析。"
     )

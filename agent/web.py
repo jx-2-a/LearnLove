@@ -64,60 +64,107 @@ def _save_agent_state(data: dict):
 
 
 # ============================================================================
-# 运行时设置面板（PROTOCOL §6 settings：model/thinking/temperature/max_tokens/valve）
+# 运行时设置面板（模型档案与可调参数）
 # ============================================================================
 
-_MODEL_OPTIONS = ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"]
+
+def _as_bool(value):
+    """把网页传来的开关值归一化为 bool。"""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
 def _build_settings_schema(config: dict) -> list:
-    """运行时设置 schema → set_settings 提交给网页设置面板。"""
-    llm = config.get("llm", {})
-    model = (llm.get("model") or "").strip()
-    if model:
-        opts = [model] + [m for m in _MODEL_OPTIONS if m != model]
-    else:
-        opts = list(_MODEL_OPTIONS)
-    valve_level = config.get("valve", {}).get("level", 1)
-    return [
-        {"key": "model", "label": "模型", "type": "select",
-         "value": model, "options": [{"label": m, "value": m} for m in opts]},
-        {"key": "thinking", "label": "思考模式", "type": "toggle",
-         "value": bool(llm.get("thinking", False))},
-        {"key": "reasoning_effort", "label": "思考强度", "type": "select",
-         "value": llm.get("reasoning_effort", "high"),
-         "options": [{"label": "低 low", "value": "low"},
-                     {"label": "高 high", "value": "high"},
-                     {"label": "最大 max", "value": "max"}]},
-        {"key": "temperature", "label": "Temperature", "type": "number",
-         "value": llm.get("temperature", 0.7)},
-        {"key": "max_tokens", "label": "Max Tokens", "type": "number",
-         "value": llm.get("max_tokens", 4096)},
-        {"key": "valve", "label": "权限级别", "type": "select",
-         "value": str(valve_level),
-         "options": [{"label": "L0 只读", "value": "0"},
-                     {"label": "L1 建议+剪贴板", "value": "1"},
-                     {"label": "L2 自动发送", "value": "2"}]},
+    """根据当前模型档案构建设置面板，模型切换后只显示它支持的参数。"""
+    from agent.model_registry import load_registry
+
+    registry = load_registry()
+    llm = chat._effective_llm_cfg(config.get("llm", {}))
+    profile_key = registry.resolve_key(llm.get("model_profile") or llm.get("model"))
+    profile = registry.profiles.get(profile_key, {})
+    options = [
+        {"label": p.get("label", key), "value": key}
+        for key, p in registry.profiles.items()
     ]
+    valve_level = config.get("valve", {}).get("level", 1)
+    fields = [{
+        "key": "model_profile", "label": "模型", "type": "select",
+        "value": profile_key, "options": options, "category": "模型",
+    }]
+    for key in profile.get("params", []):
+        if key == "model":
+            continue
+        if key == "thinking":
+            fields.append({
+                "key": key, "label": "思考模式", "type": "toggle",
+                "value": bool(llm.get(key, profile.get(key, False))), "category": "生成",
+            })
+        elif key == "reasoning_effort":
+            fields.append({
+                "key": key, "label": "思考强度", "type": "select",
+                "value": llm.get(key) or profile.get(key, "high"), "category": "生成",
+                "options": [{"label": "低 low", "value": "low"},
+                            {"label": "高 high", "value": "high"},
+                            {"label": "最大 max", "value": "max"}],
+            })
+        elif key == "temperature":
+            fields.append({
+                "key": key, "label": "Temperature", "type": "number",
+                "value": llm.get(key, profile.get(key, 0.7)), "category": "生成",
+            })
+        elif key == "max_tokens":
+            fields.append({
+                "key": key, "label": "Max Tokens", "type": "number",
+                "value": llm.get(key, profile.get(key, 4096)), "category": "生成",
+            })
+    fields.append({
+        "key": "valve", "label": "权限级别", "type": "select",
+        "value": str(valve_level), "category": "权限",
+        "options": [{"label": "L0 只读", "value": "0"},
+                    {"label": "L1 建议+剪贴板", "value": "1"},
+                    {"label": "L2 自动发送", "value": "2"}],
+    })
+    return fields
 
 
-def _make_on_setting(session, schema):
-    """网页设置面板改动（settings_set）→ 热重载应用，并重发 settings 让面板刷新显示新值。"""
+def _make_on_setting(session, config):
+    """网页改设置后热重载，并按新模型能力重建面板。"""
     def _on_setting(key, value):
         try:
             if key == "valve":
                 from agent.valve import ValveLevel, set_valve
                 set_valve(ValveLevel(int(value)))
+                config.setdefault("valve", {})["level"] = int(value)
                 chat._log(f"权限级别已切换为 L{value}", level="info")
+            elif key == "model_profile":
+                from agent.model_registry import load_registry
+
+                registry = load_registry()
+                profile = registry.profile(str(value))
+                baseline = config.get("llm", {})
+                if (not profile.get("api_key")
+                        and (profile.get("provider") == baseline.get("provider")
+                             or profile.get("api_base") == baseline.get("api_base"))):
+                    profile["api_key"] = baseline.get("api_key", "")
+                chat._RUNTIME.clear()
+                chat._RUNTIME.update(profile)
+                chat._log(f"已应用模型档案: {value}", level="info")
             else:
+                if key == "thinking":
+                    value = _as_bool(value)
+                elif key == "temperature":
+                    value = float(value)
+                elif key == "max_tokens":
+                    value = int(value)
+                else:
+                    value = str(value)
                 chat._RUNTIME[key] = value
                 chat._log(f"已应用: {key} = {value}", level="info")
-            for s in schema:
-                if s.get("key") == key:
-                    s["value"] = value
+            schema = _build_settings_schema(config)
             session.set_settings(schema)
-        except Exception:
-            pass
+        except Exception as exc:
+            chat._log(f"设置未能应用: {exc}", level="hint")
     return _on_setting
 
 
@@ -189,7 +236,7 @@ def main():
 
     # 运行时设置面板
     schema = _build_settings_schema(config)
-    session.on_setting = _make_on_setting(session, schema)
+    session.on_setting = _make_on_setting(session, config)
     session.set_settings(schema)
 
     # 启动行 → silent（只落转录不上屏）；初始化摘要 → 普通 info 气泡（非欢迎横幅，

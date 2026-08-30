@@ -17,14 +17,14 @@ wechat:
 
 # --- 必填: LLM API ---
 llm:
-  provider: "deepseek"           # deepseek | openai | custom
-  model: "deepseek-v4-flash"
-  api_base: "https://api.deepseek.com"
-  api_key: "sk-REPLACE_ME"       # 替换为你的 API key — 勿提交 git!
-  temperature: 0.7
-  max_tokens: 4096
-  thinking: false              # DeepSeek 思考模式开关（默认关闭）。开启时不支持 temperature，工具调用轮会额外消耗推理 token
-  reasoning_effort: high       # 思考强度: low | high | max（仅 thinking=true 时有效）
+  model_profile: "deepseek-v4-flash"  # 可选档案见 models.yaml；网页中也可热切换
+  # api_key: "sk-REPLACE_ME"           # 推荐设置 DEEPSEEK_API_KEY；勿提交真实密钥
+  # TJU 模型请设置 TJU_API_KEY=tk-...，然后把 model_profile 改为 tju-* 档案
+  # 下面字段可选：填写后覆盖 models.yaml 中对应档案的默认值
+  # temperature: 0.7
+  # max_tokens: 8192
+  # thinking: false
+  # reasoning_effort: high
 
 # --- 必填: 监听的联系人 ---
 contacts:
@@ -32,7 +32,7 @@ contacts:
     name: "联系人名称"
     auto_monitor: true
     voice_mode: "auto"           # auto | manual
-    whisper_model: "small"       # tiny | small | medium
+    whisper_model: "base"       # tiny | base | small | medium
 
 # --- 可选: 阀门 ---
 valve:
@@ -71,6 +71,8 @@ memory:
 review:
   initial_message_limit: 100       # 首次复盘拉取的消息条数（无历史记录时），最大 200
   include_previous_summary: true   # 是否在分析中注入上次复盘摘要作为上下文
+  include_oldest: true             # 首次复盘是否额外拉取最早的一批消息（覆盖相识初期）
+  oldest_message_limit: 50         # 最早一批拉多少条
 
 # --- 可选: 活跃技能 ---
 active_skills:

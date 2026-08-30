@@ -1,0 +1,158 @@
+# LearnLove 模型目录。终端模式与 AgentHub Web 设置面板共用此文件。
+# 密钥优先放环境变量，不要把真实密钥写进仓库。
+
+default: deepseek-v4-flash
+
+models:
+  deepseek-v4-flash:
+    label: "DeepSeek V4 Flash"
+    provider: deepseek
+    protocol: openai
+    api_base: "https://api.deepseek.com"
+    api_key_env: DEEPSEEK_API_KEY
+    model: deepseek-v4-flash
+    thinking: false
+    reasoning_effort: high
+    temperature: 0.7
+    max_tokens: 8192
+    params: [thinking, reasoning_effort, temperature, max_tokens]
+
+  deepseek-v4-pro:
+    label: "DeepSeek V4 Pro"
+    provider: deepseek
+    protocol: openai
+    api_base: "https://api.deepseek.com"
+    api_key_env: DEEPSEEK_API_KEY
+    model: deepseek-v4-pro
+    thinking: true
+    reasoning_effort: high
+    temperature: 0.7
+    max_tokens: 8192
+    params: [thinking, reasoning_effort, temperature, max_tokens]
+
+  deepseek-chat:
+    label: "DeepSeek Chat（兼容旧配置）"
+    provider: deepseek
+    protocol: openai
+    api_base: "https://api.deepseek.com"
+    api_key_env: DEEPSEEK_API_KEY
+    model: deepseek-chat
+    thinking: false
+    temperature: 0.7
+    max_tokens: 8192
+    params: [thinking, temperature, max_tokens]
+
+  deepseek-reasoner:
+    label: "DeepSeek Reasoner（兼容旧配置）"
+    provider: deepseek
+    protocol: openai
+    api_base: "https://api.deepseek.com"
+    api_key_env: DEEPSEEK_API_KEY
+    model: deepseek-reasoner
+    thinking: true
+    reasoning_effort: high
+    temperature: 0.7
+    max_tokens: 8192
+    params: [thinking, reasoning_effort, temperature, max_tokens]
+
+  tju-qwen36-35b-a3b:
+    label: "TJU Qwen3.6 35B A3B"
+    provider: tju
+    protocol: tju
+    api_base: "https://ai.tju.edu.cn/api/v3"
+    api_key_env: TJU_API_KEY
+    model: qwen3.6-35b-a3b
+    thinking: true
+    temperature: 0.7
+    max_tokens: 8192
+    params: [thinking, temperature, max_tokens]
+
+  tju-qwen36-27b:
+    label: "TJU Qwen3.6 27B"
+    provider: tju
+    protocol: tju
+    api_base: "https://ai.tju.edu.cn/api/v3"
+    api_key_env: TJU_API_KEY
+    model: qwen3.6-27b
+    thinking: true
+    temperature: 0.7
+    max_tokens: 8192
+    params: [thinking, temperature, max_tokens]
+
+  tju-deepseek-v4-flash:
+    label: "TJU DeepSeek V4 Flash"
+    provider: tju
+    protocol: tju
+    api_base: "https://ai.tju.edu.cn/api/v3"
+    api_key_env: TJU_API_KEY
+    model: deepseek-v4-flash
+    thinking: false
+    temperature: 0.7
+    max_tokens: 4096
+    params: [temperature, max_tokens]
+
+  local-qwen35-4b:
+    label: "本地 Qwen3.5 4B"
+    provider: llama-cpp
+    protocol: openai
+    api_base: "http://127.0.0.1:8080/v1"
+    api_key: "api_key"
+    model: qwen35-4b-q6
+    thinking: false
+    temperature: 0.3
+    max_tokens: 8192
+    max_context_tokens: 52500
+    params: [thinking, temperature, max_tokens]
+
+  local-qwen35-9b:
+    label: "本地 Qwen3.5 9B"
+    provider: llama-cpp
+    protocol: openai
+    api_base: "http://127.0.0.1:8080/v1"
+    api_key: "api_key"
+    model: qwen35-9b-q4
+    thinking: false
+    temperature: 0.3
+    max_tokens: 4096
+    max_context_tokens: 24000
+    params: [thinking, temperature, max_tokens]
+
+  local-granite4-tiny:
+    label: "本地 Granite 4 H Tiny"
+    provider: llama-cpp
+    protocol: openai
+    api_base: "http://127.0.0.1:8080/v1"
+    api_key: "api_key"
+    model: granite4-h-tiny-q5
+    thinking: false
+    temperature: 0.3
+    max_tokens: 8192
+    max_context_tokens: 80000
+    params: [temperature, max_tokens]
+
+  local-lfm25-8b-a1b:
+    label: "本地 LFM2.5 8B A1B"
+    provider: llama-cpp
+    protocol: openai
+    api_base: "http://127.0.0.1:8080/v1"
+    api_key: "api_key"
+    model: lfm25-8b-a1b-q4
+    thinking: true
+    temperature: 0.2
+    max_tokens: 8192
+    max_context_tokens: 48000
+    params: [thinking, temperature, max_tokens]
+
+  local-ling3-tiny:
+    label: "本地 Ling 3.0 Tiny"
+    provider: llama-cpp
+    protocol: openai
+    api_base: "http://127.0.0.1:8080/v1"
+    api_key: "api_key"
+    model: ling3-tiny-q5
+    thinking: true
+    reasoning_effort: high
+    temperature: 1.0
+    max_tokens: 8192
+    max_context_tokens: 80000
+    params: [thinking, reasoning_effort, temperature, max_tokens]

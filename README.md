@@ -48,9 +48,14 @@ cp agent/config.sample.yaml ~/.learnlove_data/config.yaml
 ```
 
 编辑 `~/.learnlove_data/config.yaml`，填入：
+
 - 微信数据库路径和密钥文件
-- LLM API key（支持 DeepSeek / OpenAI 兼容接口）
+- LLM 模型档案（`agent/models.yaml` 内置 DeepSeek、TJU 和本机 Llama Router 模型）
+- DeepSeek 可通过 `DEEPSEEK_API_KEY` 环境变量提供密钥；旧式 `api_key/model/api_base` 配置仍兼容
+- 天津大学模型通过 `TJU_API_KEY=tk-...` 提供密钥，可选 Qwen3.6 35B、Qwen3.6 27B 和 DeepSeek V4 Flash
 - 要监听的联系人（wxid + 显示名称）
+
+在 AgentHub 网页设置中切换模型会同时更新连接地址、真实模型名和默认生成参数；终端模式也读取同一份模型档案。
 
 ### 4. 启动
 

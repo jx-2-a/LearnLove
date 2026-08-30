@@ -99,7 +99,7 @@ class AgentState:
 
         self.db_cache: DBCache | None = None
         self.contacts: dict = {}           # {wxid: {nick, remark, display, alias}}
-        self.sender_maps: dict = {}         # {wxid: {sender_id: name}}
+        self.sender_maps: dict = {}         # {(wxid, table_name): {sender_id: name}}
         self.monitor_queue: queue.Queue = queue.Queue()
         self.monitor_thread: threading.Thread | None = None
         self.monitor_running = False
