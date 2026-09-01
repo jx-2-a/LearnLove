@@ -248,18 +248,6 @@ def main():
     # 上报会话分类信息 → Hub 更新会话/实例标签
     session.set_meta(label=label, project_root=get_user_data_dir())
 
-    # 配置启用了自动监听 → 启动后台监控（新消息会自动检测并建议）
-    if config.get("agent", {}).get("auto", {}).get("enabled", False):
-        contacts_to_monitor = [c["wxid"] for c in config.get("contacts", [])
-                               if c.get("auto_monitor", True)]
-        if contacts_to_monitor:
-            from agent.tools.monitor import _start_monitoring_raw
-            from agent.tools._state import state as st
-            t = _start_monitoring_raw(contacts_to_monitor)
-            st.monitor_thread = t
-            st.monitor_running = True
-            chat._log(f"▶ 自动监听已开启: {', '.join(contacts_to_monitor)}", level="info")
-
     def _worker():
         try:
             chat.run_chat(config, session)

@@ -14,6 +14,10 @@ import zstandard as zstd
 from agent.protocol import ok, err
 from agent.outputs import clip
 from agent.tools._state import state
+from agent.archive import media_results_for_messages, upsert_messages
+from agent.chat_timeline import build_agent_timeline
+from agent.media import archive_message_media
+from agent.wechat_parser import normalize_message
 
 _zstd_dctx = zstd.ZstdDecompressor()
 
@@ -315,8 +319,8 @@ def _format_message_body(m: dict) -> tuple[str, str]:
         return (type_name, content[:300] if content else f"[{type_name}]")
 
 
-def _find_msg_table(wxid: str) -> list[tuple[str, str]]:
-    """查找联系人对应的 Msg_ 表。返回 [(db_path, table_name), ...]"""
+def _find_msg_table(wxid: str) -> list[tuple[str, str, str]]:
+    """查找联系人消息表，返回临时库路径、表名和稳定的源库键。"""
     table_hash = hashlib.md5(wxid.encode()).hexdigest()
     table_name = f"Msg_{table_hash}"
     results = []
@@ -331,7 +335,7 @@ def _find_msg_table(wxid: str) -> list[tuple[str, str]]:
                 (table_name,)
             ).fetchone()
             if exists:
-                results.append((db_path, table_name))
+                results.append((db_path, table_name, rel_key))
             conn.close()
         except Exception:
             pass
@@ -364,7 +368,7 @@ def _learn_sender_map(conn, table_name: str, wxid: str, display_name: str) -> di
                 m = re.search(r'fromusername\s*=\s*"([^"]+)"', text)
                 if m:
                     from_user = m.group(1)
-                    sender_map[sid] = display_name if from_user == wxid else "你"
+                    sender_map[sid] = wxid if from_user == wxid else "__self__"
             return len(sender_map) > 0
         except Exception:
             return False
@@ -391,7 +395,7 @@ def _learn_sender_map(conn, table_name: str, wxid: str, display_name: str) -> di
             m = re.search(r'fromusername\s*=\s*"([^"]+)"', text)
             if m:
                 from_user = m.group(1)
-                sender_map[sid] = display_name if from_user == wxid else "你"
+                sender_map[sid] = wxid if from_user == wxid else "__self__"
     except Exception:
         pass
 
@@ -410,8 +414,15 @@ def _get_sender_map(conn, table_name: str, wxid: str, display_name: str,
     if cached is not None:
         return cached
 
-    # 学习
-    smap = _learn_sender_map(conn, table_name, wxid, display_name)
+    # 新版微信库提供 Name2Id：rowid 与 real_sender_id 直接对应，优先使用事实映射。
+    smap = {}
+    try:
+        for sender_id, user_name in conn.execute("SELECT rowid, user_name FROM Name2Id"):
+            smap[sender_id] = user_name or ""
+    except sqlite3.Error:
+        pass
+    if not smap:
+        smap = _learn_sender_map(conn, table_name, wxid, display_name)
     state.sender_maps[key] = smap  # 缓存结果（即便是空 map）
     return smap
 
@@ -435,29 +446,35 @@ def _query_messages(conn, table_name: str, since_ts: float = 0,
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
-    select = f"SELECT create_time, local_type, local_id, message_content, " \
-             f"WCDB_CT_message_content, real_sender_id FROM [{table_name}]"
+    select = f"SELECT create_time, local_type, local_id, server_id, sort_seq, " \
+             f"server_seq, message_content, WCDB_CT_message_content, " \
+             f"real_sender_id, packed_info_data FROM [{table_name}]"
 
     # check_new_messages 依赖：只给 since_ts 时正序拉全量（不设 LIMIT）
     if since_ts > 0 and not before_ts and not oldest:
-        sql = f"{select} {where} ORDER BY create_time ASC"
+        sql = f"{select} {where} ORDER BY create_time, sort_seq, server_seq, local_id ASC"
     else:
         # 默认倒序取最近 limit 条；oldest=True 时正序取最早 limit 条
-        order = "ORDER BY create_time ASC" if oldest else "ORDER BY create_time DESC"
+        order = ("ORDER BY create_time, sort_seq, server_seq, local_id ASC" if oldest else
+                 "ORDER BY create_time DESC, sort_seq DESC, server_seq DESC, local_id DESC")
         params.append(limit)
         sql = f"{select} {where} {order} LIMIT ?"
 
     rows = conn.execute(sql, params).fetchall()
 
     messages = []
-    for ts, lt, lid, content, ct, sid in rows:
+    for ts, lt, lid, server_id, sort_seq, server_seq, content, ct, sid, packed in rows:
         text = _decode_text(content, ct)
         messages.append({
             "create_time": ts,
             "local_type": lt,
             "local_id": lid,
+            "server_id": server_id or 0,
+            "sort_seq": sort_seq or 0,
+            "server_seq": server_seq or 0,
             "sender_id": sid,
             "content": text,
+            "packed_info_data": packed,
             "voice_text": None,
         })
     return messages
@@ -508,7 +525,7 @@ def get_chat_history(contact_name: str, limit: int = 30,
     range_min = None
     range_max = None
     range_total = 0
-    for db_path, table_name in tables:
+    for db_path, table_name, source_db in tables:
         try:
             conn = sqlite3.connect(db_path)
         except Exception:
@@ -543,28 +560,30 @@ def get_chat_history(contact_name: str, limit: int = 30,
                 ts_str = ts_dt.strftime("%Y-%m-%d %H:%M")
             else:
                 ts_str = ts_dt.strftime("%m-%d %H:%M")
-            type_name, body = _format_message_body(m)
-            sender = sender_map.get(m["sender_id"], f"sid={m['sender_id']}")
+            item = normalize_message(m, wxid, display, sender_map, source_db, table_name)
+            item["time"] = ts_str
+            item["content"] = clip(item["content"], 500)
+            all_msgs.append(item)
 
-            all_msgs.append({
-                "time": ts_str,
-                "create_time": m["create_time"],
-                "type": type_name,
-                "sender": sender,
-                "content": clip(body, 500),
-            })
-
-    # 去重 + 排序（默认倒序取最近，oldest=True 正序取最早）
-    seen = set()
-    unique = []
-    for m in all_msgs:
-        key = (m["create_time"], m["sender"], m["content"][:100])
-        if key not in seen:
-            seen.add(key)
-            unique.append(m)
-
-    unique.sort(key=lambda m: m["create_time"], reverse=not oldest)
-    result = unique[:limit]
+    # 先把完整规范化事实幂等归档，再按稳定 ID 去重。对外始终按时间正序返回，
+    # 这样模型看到的是自然对话链，而不是“最新消息倒着读”。
+    upsert_messages(all_msgs)
+    for item in all_msgs:
+        archive_message_media(item)
+    unique_by_id = {m["message_id"]: m for m in all_msgs}
+    unique = sorted(unique_by_id.values(), key=lambda m: (
+        m["create_time"], m.get("sort_seq", 0), m.get("server_seq", 0),
+        m.get("local_id", 0), m["message_id"]))
+    result = unique[:limit] if oldest else unique[-limit:]
+    media = media_results_for_messages([item["message_id"] for item in result])
+    for item in result:
+        if item["message_id"] in media:
+            item["media"] = media[item["message_id"]]
+    agent_view = build_agent_timeline(result, display)
+    for item in result:
+        item.pop("raw_content", None)
+        item.pop("source_db", None)
+        item.pop("source_table", None)
 
     range_info = {}
     if range_min is not None and range_max is not None:
@@ -577,6 +596,7 @@ def get_chat_history(contact_name: str, limit: int = 30,
         }
 
     return ok({"contact": display, "messages": result, "count": len(result),
+               "agent_view": agent_view,
                "oldest": oldest,
                "range": range_info,
                "query": {"date": date, "since_ts": since_ts, "before_ts": before_ts}})
@@ -609,40 +629,47 @@ def check_new_messages(contact_name: str = None) -> dict:
     for wxid in wxids:
         state_key = f"last_ts_{wxid}"
         since_ts = stored_state.get(state_key, 0)
+        boundary_ids = set(stored_state.get(f"last_ids_{wxid}", []))
         display = displays.get(wxid, wxid)
 
         tables = _find_msg_table(wxid)
         if not tables:
             continue
 
-        for db_path, table_name in tables:
+        for db_path, table_name, source_db in tables:
             try:
                 conn = sqlite3.connect(db_path)
             except Exception:
                 continue
 
             smap = _get_sender_map(conn, table_name, wxid, display, db_path)
-            msgs = _query_messages(conn, table_name, since_ts=since_ts)
+            # 回看一秒并用稳定 ID 消除边界重复，避免同一秒稍后落库的消息永远漏掉。
+            msgs = _query_messages(conn, table_name, since_ts=max(0, since_ts - 1))
             conn.close()
 
             for m in msgs:
                 ts_str = datetime.fromtimestamp(m["create_time"]).strftime("%m-%d %H:%M")
-                type_name, body = _format_message_body(m)
-                sender = smap.get(m["sender_id"], f"sid={m['sender_id']}")
+                item = normalize_message(m, wxid, display, smap, source_db, table_name)
+                if item["create_time"] < since_ts:
+                    continue
+                if item["create_time"] == since_ts and item["message_id"] in boundary_ids:
+                    continue
+                item["time"] = ts_str
+                item["wxid"] = wxid
+                item["contact"] = display
+                all_new.append(item)
 
-                all_new.append({
-                    "time": ts_str,
-                    "create_time": m["create_time"],
-                    "wxid": wxid,
-                    "contact": display,
-                    "type": type_name,
-                    "local_type": m["local_type"],
-                    "sender": sender,
-                    "sender_id": m["sender_id"],
-                    "content": body,
-                    "raw_content": m["content"],
-                    "voice_text": m.get("voice_text"),
-                })
+    # 多数据库可能重叠，稳定消息 ID 是唯一去重依据。
+    all_new = list({m["message_id"]: m for m in all_new}.values())
+    all_new.sort(key=lambda m: (m["create_time"], m.get("sort_seq", 0),
+                                m.get("server_seq", 0), m.get("local_id", 0)))
+    upsert_messages(all_new)
+    for item in all_new:
+        archive_message_media(item)
+    media = media_results_for_messages([item["message_id"] for item in all_new])
+    for item in all_new:
+        if item["message_id"] in media:
+            item["media"] = media[item["message_id"]]
 
     # 更新状态
     if all_new:
@@ -651,13 +678,17 @@ def check_new_messages(contact_name: str = None) -> dict:
             if wx_msgs:
                 max_ts = max(m["create_time"] for m in wx_msgs)
                 stored_state[f"last_ts_{wxid}"] = max_ts
+                stored_state[f"last_ids_{wxid}"] = [
+                    m["message_id"] for m in wx_msgs if m["create_time"] == max_ts
+                ]
         state.save_state(stored_state)
-
-    # 按时间排序
-    all_new.sort(key=lambda m: m["create_time"])
 
     return ok({
         "messages": all_new,
+        "agent_view": build_agent_timeline(
+            all_new,
+            contact_name or (all_new[0]["contact"] if all_new else ""),
+        ),
         "count": len(all_new),
         "contacts_checked": len(wxids),
     })

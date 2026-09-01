@@ -27,12 +27,26 @@ llm:
   # reasoning_effort: high
 
 # --- 必填: 监听的联系人 ---
-contacts:
-  - wxid: "wxid_xxxxx"
-    name: "联系人名称"
-    auto_monitor: true
-    voice_mode: "auto"           # auto | manual
-    whisper_model: "base"       # tiny | base | small | medium
+contacts: []                      # 启动默认不加载；使用 /contact <名称> 明确指定
+
+# --- 可选: 全局媒体开关（/voice、/image 会持久化本机偏好） ---
+media:
+  voice_mode: "manual"           # auto | manual
+  image_mode: "manual"           # auto | manual
+
+# --- 可选: 媒体识别 ---
+# 本地模型和远程 API 都通过 agent.media_api.register_media_provider 注册：
+#   speech_to_text      语音转文字
+#   image_understanding 图片理解/OCR
+# 本地模型由 agent/media_models.json 注册，文件位于 models/media 与 runtime/media。
+# 可用 LEARNLOVE_SPEECH_MODEL / LEARNLOVE_VISION_MODEL 选择其他注册模型，
+# 或用 LEARNLOVE_MEDIA_REGISTRY 指向另一份注册表。
+# 原文件会先保存到用户数据目录 archive/media，处理器不可用时任务不会丢失。
+media_api:
+  speech_to_text:
+    provider: ""
+  image_understanding:
+    provider: ""
 
 # --- 可选: 阀门 ---
 valve:
@@ -50,8 +64,9 @@ agent:
 
   # 上下文
   context:
-    max_history_turns: 20
-    max_context_tokens: 8000
+    max_history_turns: 20         # 压缩时至少保留的近期轮数，不再作为硬裁剪上限
+    use_model_context_window: true # 默认使用 models.yaml 的模型窗口（DeepSeek V4 为 1M）
+    max_context_tokens: 0          # 仅当上项为 false 时作为手动窗口上限
     compress_older: true
 
   # 回复
@@ -62,10 +77,19 @@ agent:
 # --- 可选: 记忆 ---
 memory:
   enabled: true
-  max_memory_chars: 4000
-  transcript_max_chars: 60000
-  compact_turns: 30
+  max_memory_chars: 8000
+  global_max_memory_chars: 5000
+  global_transcript_max_chars: 30000
+  global_compact_turns: 30
+  transcript_max_chars: 800000    # 压缩触发阈值，同时作为单批上限；不会裁掉超出部分
+  compact_turns: 200
   inject_tail_lines: 20
+
+# --- 可选: LearnLove 独立对话账本 ---
+conversation:
+  restore_messages: 1000          # /restore 恢复到工作上下文的最近消息数，完整原文仍可搜索
+# 如 AgentHub 不在项目同级目录，可设置环境变量：
+# AGENT_HUB_ARCHIVE_DIR=D:\path\to\AgentHub\data\archives
 
 # --- 可选: 复盘分析 ---
 review:

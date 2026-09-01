@@ -50,7 +50,7 @@ SYSTEM_PROMPT_TEMPLATE = """你是 LearnLove Agent — 用户的微信聊天助�
 ## 工具使用注意事项
 - 查询消息前先确保解密已刷新
 - 聊天记录可能跨多年：get_chat_history 默认只返回最近一批，要看早期记录需用 date（如 '2024年6月'）或 oldest=true 参数
-- 语音消息如果标记为 [语音待转]，提醒用户手动转录
+- 语音消息如果标记为 [语音待转写]，说明识别结果尚未产生，不要猜测内容
 - 发送功能需要相应阀门权限
 - 记忆操作（record_lesson等）适度使用，不要每条消息都记录"""
 
@@ -93,7 +93,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_chat_history",
-            "description": "获取与指定联系人的聊天记录（文字自动解码，语音标注类型）。默认返回最近的一批消息；历史可能跨多年，返回结果带 range 字段标明可查询的最早/最晚日期与总条数。要看更早或指定时期的记录，用 date 或 oldest 参数",
+            "description": "获取与指定联系人的聊天记录。优先读取 agent_view.transcript 和 diagnostics；messages 是带证据 ID、引用与媒体状态的结构化事实。默认返回最近一批，range 标明完整跨度；更早记录用 date 或 oldest",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -112,7 +112,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "check_new_messages",
-            "description": "检查指定联系人是否有新消息。返回上次检查之后的所有新消息（文字自动解码，语音自动转录或标记待转）",
+            "description": "检查指定联系人是否有新消息。优先读取按时间升序的 agent_view；语音和图片未识别时会明确标记待处理，不代表其实际内容",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -138,12 +138,12 @@ TOOLS = [
             },
         },
     },
-    # ---- 语音解码 ----
+    # ---- 媒体归档与可插拔处理器 ----
     {
         "type": "function",
         "function": {
             "name": "decode_voice",
-            "description": "手动解码语音消息。当某条语音消息标记为 [语音待转] 时，用此工具触发转录。需要 GPU 支持（faster-whisper）",
+            "description": "归档指定语音原文件并加入语音转写队列，由已注册的本地模型或远程 API 处理",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -158,14 +158,37 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "set_voice_mode",
-            "description": "切换语音处理模式。auto=自动本地转录（需要GPU），manual=标记待转等用户手动提供文本",
+            "description": "切换语音处理模式。api 为兼容名称，表示交给已注册的自动处理器；manual=只归档并等待人工内容",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "contact_name": {"type": "string", "description": "联系人名称"},
-                    "mode": {"type": "string", "description": "auto 或 manual"},
+                    "mode": {"type": "string", "enum": ["api", "manual"], "description": "api 或 manual"},
                 },
                 "required": ["contact_name", "mode"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "media_api_status",
+            "description": "查看语音转文字和识图处理器、本地模型运行条件及待处理任务数量",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "process_media_queue",
+            "description": "用已注册的本地或远程处理器执行媒体队列；未配置时任务保持待处理",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "capability": {"type": "string", "enum": ["speech_to_text", "image_understanding"]},
+                    "limit": {"type": "integer", "description": "本次最多处理数量，默认 10"},
+                },
+                "required": [],
             },
         },
     },
@@ -281,6 +304,110 @@ TOOLS = [
                     "limit": {"type": "integer", "description": "返回最近几条，默认 10"},
                     "max_chars": {"type": "integer", "description": "返回内容总字符上限，默认 4000"},
                     "keyword": {"type": "string", "description": "按标题/内容中的关键词过滤"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_conversation_history",
+            "description": "搜索 LearnLove 自动保存的用户、助手、工具及已导入 Hub 归档对话。结果带 entry_id，可再读取完整原文",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {"type": "string", "description": "关键词；留空则按时间列出最近记录"},
+                    "contact_name": {"type": "string", "description": "可选联系人范围"},
+                    "source_sid": {"type": "string", "description": "可选 Hub 原会话 sid"},
+                    "role": {"type": "string", "enum": ["user", "assistant", "system", "tool", "wechat_contact"]},
+                    "limit": {"type": "integer", "description": "返回数量，默认 20，最大 200"},
+                    "offset": {"type": "integer", "description": "分页偏移，默认 0；读取下一页时加上上一页数量"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_conversation_history",
+            "description": "按 entry_id 读取一条未裁剪的完整 LearnLove 对话记录",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "entry_id": {"type": "string", "description": "搜索结果中的稳定记录 ID"},
+                },
+                "required": ["entry_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_saved_conversations",
+            "description": "列出 LearnLove 本地保存的会话和已导入 Hub 归档来源",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "返回数量，默认 50"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "import_hub_conversation",
+            "description": "把 Hub 已完全归档的 JSONL 会话导入 LearnLove 独立账本，之后可搜索、读取和恢复上下文；重复导入会自动去重",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source_sid": {"type": "string", "description": "Hub 原会话 sid，如 8"},
+                    "archive_path": {"type": "string", "description": "可选归档 JSONL 文件或 archives 目录路径"},
+                    "contact_name": {"type": "string", "description": "可选，关联到当前联系人"},
+                },
+                "required": ["source_sid"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "record_event",
+            "description": "把用户讲述的事件或故事结构化留存，保留全貌、事实、不确定项、情绪和来源消息。重要事件优先用此工具而不是普通 note；传 event_id 可修订且保留旧版本",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "简明事件标题"},
+                    "summary": {"type": "string", "description": "不加入臆测的核心摘要"},
+                    "narrative": {"type": "string", "description": "按时间和因果顺序保留的完整叙述"},
+                    "contact_name": {"type": "string", "description": "关联联系人，默认当前联系人"},
+                    "event_time": {"type": "string", "description": "事件发生时间或范围，不确定可留空"},
+                    "participants": {"type": "array", "items": {"type": "string"}},
+                    "facts": {"type": "array", "items": {"type": "string"}, "description": "用户明确讲述或消息可证实的事实"},
+                    "emotions": {"type": "array", "items": {"type": "string"}},
+                    "uncertainties": {"type": "array", "items": {"type": "string"}, "description": "未确认、转述或可能有偏差之处"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "source_message_ids": {"type": "array", "items": {"type": "string"}},
+                    "event_id": {"type": "string", "description": "修订已有事件时填写"},
+                },
+                "required": ["title", "summary"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "view_events",
+            "description": "查看或搜索结构化事件/故事，供关系分析和复盘核对事实",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "contact_name": {"type": "string"},
+                    "keyword": {"type": "string"},
+                    "limit": {"type": "integer"},
                 },
                 "required": [],
             },

@@ -59,6 +59,26 @@ def memory_md_path(name: str) -> str:
     return os.path.join(memory_dir(name), "memory.md")
 
 
+def global_memory_dir() -> str:
+    """返回服务于用户本人、非任何联系人的全局记忆目录。"""
+    return os.path.join(get_user_data_dir(), "memory", "_global")
+
+
+def global_memory_path() -> str:
+    """返回可注入所有对话的用户全局记忆文件。"""
+    return os.path.join(global_memory_dir(), "memory.md")
+
+
+def global_memory_transcript_path() -> str:
+    """返回全局记忆的待整理原始记录文件。"""
+    return os.path.join(global_memory_dir(), "transcript.jsonl")
+
+
+def media_preferences_path() -> str:
+    """返回本机持久化的媒体模式设置文件。"""
+    return os.path.join(live_dir(), "media_preferences.json")
+
+
 def transcript_path(name: str) -> str:
     return os.path.join(memory_dir(name), "transcript.jsonl")
 
@@ -100,6 +120,12 @@ def reviews_dir() -> str:
     return os.path.join(get_user_data_dir(), "reviews")
 
 
+def contact_reviews_dir(name: str) -> str:
+    """返回某联系人的独立复盘报告目录。"""
+    safe_name = str(name or "未分类").replace("/", "_").replace("\\", "_")
+    return os.path.join(reviews_dir(), safe_name)
+
+
 def live_dir() -> str:
     return os.path.join(get_user_data_dir(), "live")
 
@@ -126,12 +152,23 @@ def voice_cache_dir() -> str:
     return os.path.join(get_user_data_dir(), "voice_cache")
 
 
+def records_db_path() -> str:
+    """统一事实归档库路径。"""
+    return os.path.join(get_user_data_dir(), "archive", "records.db")
+
+
+def archived_media_dir() -> str:
+    """语音、图片等原始媒体的长期归档目录。"""
+    return os.path.join(get_user_data_dir(), "archive", "media")
+
+
 # ---- 目录创建 ----
 
 
 def ensure_dirs():
     """确保所有必要的子目录存在。"""
-    dirs = [styles_dir(), spills_dir(), reviews_dir(), live_dir(), voice_cache_dir()]
+    dirs = [styles_dir(), spills_dir(), reviews_dir(), live_dir(), voice_cache_dir(),
+            archived_media_dir()]
     # memory_dir 按需创建，这里只建根目录
     memory_root = memory_dir()
     dirs.append(memory_root)

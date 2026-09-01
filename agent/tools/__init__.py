@@ -13,6 +13,14 @@ from datetime import datetime
 from agent.tools.contact import find_contact, list_contacts, switch_contact
 from agent.tools.message import get_chat_history, check_new_messages, search_messages, get_live_feed
 from agent.tools.decode import decode_voice, batch_decode_voices, set_voice_mode
+from agent.tools.event import record_event, view_events
+from agent.tools.conversation import (
+    import_hub_conversation,
+    list_saved_conversations,
+    read_conversation_history,
+    search_conversation_history,
+)
+from agent.media_api import media_api_status, process_media_queue
 from agent.tools.send import copy_to_clipboard, auto_send, check_wechat_window
 from agent.tools.monitor import _start_monitoring_raw, stop_monitoring, check_monitor_status
 from agent.tools.review import list_reviews, read_review
@@ -418,6 +426,8 @@ TOOL_MAP = {
     # 语音
     "decode_voice": decode_voice,
     "set_voice_mode": set_voice_mode,
+    "media_api_status": media_api_status,
+    "process_media_queue": process_media_queue,
     # 发送
     "copy_reply": copy_to_clipboard,
     "copy_to_clipboard": copy_to_clipboard,
@@ -435,6 +445,14 @@ TOOL_MAP = {
     # 留档（时间点快照，按需读取）
     "record_note": _record_note_handler,
     "view_notes": _view_notes_handler,
+    # LearnLove 独立对话账本与 Hub 归档导入
+    "search_conversation_history": search_conversation_history,
+    "read_conversation_history": read_conversation_history,
+    "list_saved_conversations": list_saved_conversations,
+    "import_hub_conversation": import_hub_conversation,
+    # 事件/故事（自动注入近期摘要，保留修订历史和证据消息 ID）
+    "record_event": record_event,
+    "view_events": view_events,
     # 表达翻译
     "express_translate": _express_translate_handler,
     # 技能管理

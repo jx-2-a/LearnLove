@@ -24,8 +24,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 from agent.protocol import ok, err
 from agent.llm import chat as llm_chat, chat_stream, _get_tools
-from agent.context import ContextBuilder
-from agent.memory import ContactMemory
+from agent.context import ContextBuilder, input_token_budget
+from agent.memory import ContactMemory, compact_session_history
 from agent.tools import dispatch as tool_dispatch
 from agent.tools._state import state
 from agent.tools.review import get_review_tools
@@ -67,6 +67,7 @@ _session = None
 # 网页设置面板热重载的运行时模型档案与生成参数。
 # 由 web.py 的 on_setting 写入，_effective_llm_cfg 合并覆盖到每次 LLM 调用。
 _RUNTIME = {}
+_LEDGER_WRITE_ERROR_SHOWN = False
 
 
 def _log(text, level="info"):
@@ -75,6 +76,37 @@ def _log(text, level="info"):
         _session.log(text, level=level)
     else:
         _print(text)
+
+
+def _conversation_identity(contact_name: str = "") -> tuple[str, str]:
+    """返回当前本地账本会话键与 Hub sid。"""
+    sid = str(getattr(_session, "_sid", "") or "")
+    if sid:
+        return f"hub:{sid}", sid
+    return f"contact:{contact_name or '自己'}", ""
+
+
+def _save_conversation(role: str, content, contact_name: str = "", **metadata):
+    """对话账本写入失败不能阻断聊天主链路。"""
+    global _LEDGER_WRITE_ERROR_SHOWN
+    if content in (None, ""):
+        return
+    try:
+        from agent.conversation_store import save_conversation_entry
+        session_key, sid = _conversation_identity(contact_name)
+        save_conversation_entry(
+            role=role,
+            content=str(content),
+            session_key=session_key,
+            contact_name=contact_name,
+            source="learnlove",
+            source_sid=sid,
+            metadata=metadata,
+        )
+    except Exception as exc:
+        if not _LEDGER_WRITE_ERROR_SHOWN:
+            _LEDGER_WRITE_ERROR_SHOWN = True
+            _log(f"⚠️ 对话账本写入失败，本轮仍继续运行：{exc}", level="important")
 
 
 def _md(text):
@@ -144,11 +176,17 @@ def _print_help():
 | `/file <路径>` | 读取本地文本文件 |
 | `/copy` | 复制最后一条建议到剪贴板 |
 | `/send` | 自动发送最后一条建议（需阀门 L2） |
-| `/voice <auto|manual>` | 切换语音处理模式 |
-| `/contact <名称>` | 切换当前联系人 |
+| `/voice <auto|manual>` | 启用/停用全局语音模型自动转写 |
+| `/image <auto|manual>` | 启用/停用全局图片理解模型 |
+| `/media [status|voice|image]` | 查看状态或处理媒体待办队列 |
+| `/contact <名称>` | 指定当前联系人；启动默认不选择任何人 |
 | `/memory` | 查看当前联系人的长期记忆 |
+| `/global-memory [内容]` | 查看或写入服务用户本人的全局记忆 |
 | `/save <内容>` | 把重要内容留档（时间点快照，之后可找回来） |
 | `/notes [关键词]` | 查看/搜索留档（含日期） |
+| `/history [关键词]` | 搜索 LearnLove 自动保存的全部对话 |
+| `/restore <Hub sid> [归档路径]` | 导入已完全归档的 Hub 会话并继续 |
+| `/sessions` | 列出本地可搜索/恢复的对话会话 |
 | `/skills` | 查看活跃技能 |
 | `/clear` | 清除对话历史 |
 | `/h`, `/help` | 显示此帮助 |
@@ -260,12 +298,24 @@ def _execute_tool_loop(messages: list[dict], llm_cfg: dict,
         result = _call_llm()
 
         if result["type"] == "text":
+            _save_conversation(
+                "assistant", result["content"], state.active_contact_name,
+                channel="llm", tool_loop=True,
+            )
             return result["content"]
 
         elif result["type"] == "error":
+            _save_conversation(
+                "system", result["content"], state.active_contact_name,
+                channel="llm_error",
+            )
             return f"[LLM 错误] {result['content']}"
 
         elif result["type"] == "cancelled":
+            _save_conversation(
+                "system", "LLM 调用已由用户打断", state.active_contact_name,
+                channel="interrupt",
+            )
             return "[系统] 已打断"
 
         elif result["type"] == "tool_calls":
@@ -327,6 +377,19 @@ def _execute_tool_loop(messages: list[dict], llm_cfg: dict,
                 except Exception as e:
                     tool_result = err(f"工具执行异常: {e}")
 
+                _save_conversation(
+                    "tool",
+                    json.dumps({
+                        "name": tool_name,
+                        "args": tool_args,
+                        "result": tool_result,
+                    }, ensure_ascii=False, default=str),
+                    state.active_contact_name,
+                    channel="tool",
+                    tool_name=tool_name,
+                    tool_call_id=call_id,
+                )
+
                 if _session is not None:
                     if tool_result.get("ok"):
                         _session.tool_event(
@@ -359,6 +422,10 @@ def _execute_tool_loop(messages: list[dict], llm_cfg: dict,
                     g = _session.poll_guidance()
                     if g:
                         _guidance.append(g)
+                        _save_conversation(
+                            "user", g, state.active_contact_name,
+                            channel="guidance", during_tool_loop=True,
+                        )
                     if _session.pop_interrupt():
                         interrupted = True
                         break
@@ -501,7 +568,6 @@ def run_chat(config: dict, session=None):
     global _session
     _session = session
     llm_cfg = config.get("llm", {})
-    contacts_cfg = config.get("contacts", [])
     memory_cfg = config.get("memory", {})
     agent_cfg = config.get("agent", {})
     valve_cfg = config.get("valve", {})
@@ -521,16 +587,9 @@ def run_chat(config: dict, session=None):
     contact_wxid = ""
     contact_memory = None
 
-    if contacts_cfg:
-        first = contacts_cfg[0]
-        contact_wxid = first.get("wxid", "")
-        contact_name = first.get("name", "")
-        state.active_contact_wxid = contact_wxid
-        state.active_contact_name = contact_name
-
-        # 加载记忆
-        contact_memory = ContactMemory(contact_name, llm_cfg)
-        contact_memory.startup()
+    from agent.global_memory import GlobalMemory
+    global_memory = GlobalMemory(llm_cfg)
+    global_memory.startup()
 
     # 标题
     _print("")
@@ -546,15 +605,15 @@ def run_chat(config: dict, session=None):
     review_context = ""  # 复盘分析结果，切入咨询模式时注入
 
     # 辅助：保存/加载会话上下文（agent <-> 用户对话，非微信消息）
-    def _save_context(name: str, msgs: list, keep: int = 40):
-        """保存最近 N 条对话到磁盘，用于重启恢复。"""
+    def _save_context(name: str, msgs: list):
+        """保存完整工作上下文；早期原文另由 transcript 持久化。"""
         if not name or not msgs:
             return
         try:
             p = context_json_path(name)
             os.makedirs(os.path.dirname(p), exist_ok=True)
             with open(p, "w", encoding="utf-8") as f:
-                json.dump(msgs[-keep:], f, ensure_ascii=False, indent=2)
+                json.dump(msgs, f, ensure_ascii=False, indent=2)
         except Exception:
             pass  # 保存失败不影响运行
 
@@ -593,10 +652,21 @@ def run_chat(config: dict, session=None):
                 for entry in auto_new:
                     entry_contact = entry.get("sender", "?")
                     entry_content = entry.get("content", "")
-                    entry_type = entry.get("type", 1)
+                    entry_type = entry.get("local_type", entry.get("type", 1))
+                    sender_role = entry.get("sender_role", "")
 
                     # 自己的消息：显示但不分析，作为上下文保留
-                    is_self = (entry_contact == "你")
+                    is_self = (
+                        sender_role == "self"
+                        if sender_role
+                        else entry_contact in ("你", "我")
+                    )
+                    if sender_role in {"unknown", "system"}:
+                        _print(
+                            "  ⚠ 跳过系统消息或发送者未确认的消息，避免误触发回复",
+                            style="yellow",
+                        )
+                        continue
 
                     # 语音消息处理
                     if entry_type == 34:
@@ -651,6 +721,16 @@ def run_chat(config: dict, session=None):
                 if not processed:
                     continue
 
+                for message in processed:
+                    _save_conversation(
+                        "user" if message.get("is_self") else "wechat_contact",
+                        message.get("content", ""),
+                        contact_name,
+                        channel="wechat_auto",
+                        sender=message.get("sender", ""),
+                        message_time=message.get("time", ""),
+                    )
+
                 # 如果全是自己的消息，不触发分析（只作为上下文记住）
                 from_contact = [m for m in processed if not m.get("is_self")]
                 if not from_contact:
@@ -668,8 +748,11 @@ def run_chat(config: dict, session=None):
                         contact_wxid=contact_wxid,
                         new_messages=processed,
                         memory_text=contact_memory.memory_text() if contact_memory else "",
+                        global_memory_text=global_memory.memory_text(),
                         skill_modifiers=_get_skill_modifiers(),
-                        max_tokens=agent_cfg.get("context", {}).get("max_context_tokens", 8000),
+                        max_tokens=input_token_budget(
+                            _effective_llm_cfg(llm_cfg), agent_cfg.get("context", {}),
+                        ),
                     )
 
                     with _console.status("[cyan]思考中...[/cyan]") if _console else contextlib.nullcontext():
@@ -685,8 +768,19 @@ def run_chat(config: dict, session=None):
                     for entry in late_entries:
                         entry_contact = entry.get("sender", "?")
                         entry_content = entry.get("content", "")
-                        entry_type = entry.get("type", 1)
-                        is_self = (entry_contact == "你")
+                        entry_type = entry.get("local_type", entry.get("type", 1))
+                        sender_role = entry.get("sender_role", "")
+                        is_self = (
+                            sender_role == "self"
+                            if sender_role
+                            else entry_contact in ("你", "我")
+                        )
+                        if sender_role in {"unknown", "system"}:
+                            _print(
+                                "  ⚠ [偷跑] 系统消息或发送者未确认，已跳过",
+                                style="yellow",
+                            )
+                            continue
 
                         # 自己的消息只静默记录
                         if is_self:
@@ -713,6 +807,15 @@ def run_chat(config: dict, session=None):
                         })
 
                     if late_processed:
+                        for message in late_processed:
+                            _save_conversation(
+                                "user" if message.get("is_self") else "wechat_contact",
+                                message.get("content", ""),
+                                contact_name,
+                                channel="wechat_auto_late",
+                                sender=message.get("sender", ""),
+                                message_time=message.get("time", ""),
+                            )
                         processed.extend(late_processed)
                         # 只有对方发了新消息才重新分析
                         late_from_contact = [m for m in late_processed if not m.get("is_self")]
@@ -759,6 +862,7 @@ def run_chat(config: dict, session=None):
                             _print("  📝 压缩记忆中...", style="dim")
                             contact_memory.compact(
                                 max_memory_chars=memory_cfg.get("max_memory_chars", 4000),
+                                transcript_max_chars=memory_cfg.get("transcript_max_chars", 60000),
                             )
 
                 continue  # 处理完自动新消息后继续循环
@@ -820,10 +924,16 @@ def run_chat(config: dict, session=None):
             if not user_input:
                 continue
 
+            _save_conversation(
+                "user", user_input, contact_name,
+                channel="hub" if _session is not None else "terminal",
+                coach_mode=coach_mode,
+            )
+
             # Slash 命令
             if user_input.startswith("/"):
                 result = _handle_slash(user_input, config, contact_name, contact_wxid,
-                                       contact_memory, last_suggestion)
+                                       contact_memory, global_memory, last_suggestion)
                 if result == "exit":
                     break
                 if isinstance(result, tuple) and result[0] == "switch_contact":
@@ -843,6 +953,39 @@ def run_chat(config: dict, session=None):
                         _print(f"  已切换到: {contact_name}", style="green")
                         if loaded:
                             _print(f"  📝 已恢复对话上下文 ({len(loaded)} 条消息)", style="dim")
+                elif isinstance(result, tuple) and result[0] == "restore_hub":
+                    source_sid = result[1]
+                    archive_path = result[2] if len(result) > 2 else ""
+                    try:
+                        from agent.conversation_store import (
+                            import_hub_archive,
+                            restore_conversation_messages,
+                        )
+                        info = import_hub_archive(
+                            source_sid=source_sid,
+                            archive_path=archive_path,
+                            contact_name=contact_name,
+                        )
+                        restored = restore_conversation_messages(
+                            session_key=info["session_key"],
+                            limit=config.get("conversation", {}).get("restore_messages", 1000),
+                        )
+                        if not restored:
+                            _print(f"  ⚠️ Hub 归档 {source_sid} 中没有可恢复的用户/助手消息", style="yellow")
+                        else:
+                            if contact_name and chat_messages:
+                                _save_context(contact_name, chat_messages)
+                            chat_messages = restored
+                            if contact_name:
+                                _save_context(contact_name, chat_messages)
+                            _print(
+                                f"  ✅ 已恢复 Hub 会话 {source_sid}：{len(restored)} 条上下文消息，"
+                                f"本次新增归档记录 {info['entries_inserted']} 条",
+                                style="green",
+                            )
+                            _print("  现在可直接继续对话；Hub 会使用当前新 sid，原归档保持只读。", style="dim")
+                    except Exception as exc:
+                        _print(f"  ❌ 恢复 Hub 归档失败: {exc}", style="red")
                 elif result == "review":
                     analysis_text = _do_review(contact_name, contact_wxid, llm_cfg, config,
                                                contact_memory=contact_memory)
@@ -873,6 +1016,25 @@ def run_chat(config: dict, session=None):
             # 普通对话：发送给 LLM
             _print("  ▸ 思考中...", style="dim")
 
+            context_cfg = agent_cfg.get("context", {})
+            effective_cfg = _effective_llm_cfg(llm_cfg)
+            available_input_tokens = input_token_budget(effective_cfg, context_cfg)
+            if context_cfg.get("compress_older", True) and chat_messages:
+                protected_messages = max(
+                    2, int(context_cfg.get("max_history_turns", 20) or 20) * 2,
+                )
+                compacted_messages, did_compact = compact_session_history(
+                    chat_messages,
+                    effective_cfg,
+                    available_input_tokens,
+                    keep_recent_messages=protected_messages,
+                )
+                if did_compact:
+                    chat_messages = compacted_messages
+                    if contact_name:
+                        _save_context(contact_name, chat_messages)
+                    _log("📝 早期会话已做保真摘要；原文仍保存在 transcript/归档。", level="info")
+
             # 构建上下文（咨询模式用不同的 system prompt）
             if coach_mode:
                 # 咨询模式：COACH_SYSTEM_PROMPT + 技能 + 记忆（无聊天历史）
@@ -895,6 +1057,9 @@ def run_chat(config: dict, session=None):
                         ),
                     })
                 # 注入记忆和风格
+                global_mem = global_memory.memory_text()
+                if global_mem:
+                    msg_context.append({"role": "system", "content": f"## 用户全局记忆\n{global_mem}"})
                 mem = contact_memory.memory_text() if contact_memory else ""
                 if mem:
                     msg_context.append({"role": "system", "content": f"## 关于 {contact_name}\n{mem}"})
@@ -909,8 +1074,8 @@ def run_chat(config: dict, session=None):
                         style_text += f"## {contact_name} 的风格\n{cstyle[:300]}"
                     if style_text:
                         msg_context.append({"role": "system", "content": style_text})
-                # 追加对话历史（仅本轮 session 的，不含聊天记录）
-                for cm in chat_messages[-10:]:
+                # 追加完整工作上下文；接近窗口时才分批摘要早期内容。
+                for cm in chat_messages:
                     msg_context.append(cm)
                 msg_context.append({"role": "user", "content": user_input})
                 # 咨询模式额外暴露复盘报告工具，便于回顾历史复盘
@@ -922,9 +1087,12 @@ def run_chat(config: dict, session=None):
                     contact_wxid=contact_wxid,
                     recent_history=None,
                     memory_text=contact_memory.memory_text() if contact_memory else "",
+                    global_memory_text=global_memory.memory_text(),
                     skill_modifiers=_get_skill_modifiers(),
-                    max_tokens=agent_cfg.get("context", {}).get("max_context_tokens", 8000),
+                    max_tokens=available_input_tokens,
                 )
+                # 回复模式也保留 agent 与用户的连续会话，避免每轮实际失忆。
+                msg_context.extend(chat_messages)
                 msg_context.append({"role": "user", "content": user_input})
                 active_tools = None  # 用默认工具集（不含复盘报告工具）
 
@@ -944,11 +1112,6 @@ def run_chat(config: dict, session=None):
             # 更新聊天消息
             chat_messages.append({"role": "user", "content": user_input})
             chat_messages.append({"role": "assistant", "content": reply})
-
-            # 保持消息历史在合理长度
-            max_history = agent_cfg.get("context", {}).get("max_history_turns", 20) * 2
-            if len(chat_messages) > max_history:
-                chat_messages = chat_messages[-max_history:]
 
             # 自动保存对话上下文（防崩溃丢数据）
             if contact_name:
@@ -977,6 +1140,7 @@ def run_chat(config: dict, session=None):
             _print("  📝 最终压缩记忆...", style="dim")
             contact_memory.compact(
                 max_memory_chars=memory_cfg.get("max_memory_chars", 4000),
+                transcript_max_chars=memory_cfg.get("transcript_max_chars", 60000),
             )
         except Exception:
             pass
@@ -1011,7 +1175,8 @@ COACH_SYSTEM_PROMPT = """你是 LearnLove Agent 的咨询教练模式。你不�
 ## 工具与沉淀
 - 需要回顾历史复盘时，用 list_reviews 查看有哪些报告，read_review 读取内容
 - 讨论出对后续沟通有长期价值的原则、教训、行动方案时，用 record_lesson 记录（记得带 contact_name）。会自动沉淀到 lessons.json，后续聊天自动参考
-- 讨论中产生的重要内容（故事/感受/想法/做法/一起创造的东西）想留档时，用 record_note 记录（带 contact_name，无活动联系人会落「自己」）。note 是时间点快照，不被自动注入——用户想找回过去时用 view_notes 按需读取
+- 用户讲述完整事件/故事时用 record_event：保留完整叙述、事实、情绪、不确定项和证据消息 ID，近期事件摘要会进入后续分析
+- 一般感受、想法、做法或共同创造物想留档时用 record_note；它是时间点快照，不自动注入
 - 不要为记录而记录，只记真正有价值的发现
 
 ## 重要原则
@@ -1320,8 +1485,8 @@ def _do_review(contact_name: str, contact_wxid: str, llm_cfg: dict, config: dict
 
     # ---- 13. 保存复盘报告 ----
     try:
-        from agent.paths import reviews_dir
-        review_dir = reviews_dir()
+        from agent.paths import contact_reviews_dir
+        review_dir = contact_reviews_dir(contact_name)
         os.makedirs(review_dir, exist_ok=True)
         review_file = os.path.join(
             review_dir,
@@ -1344,9 +1509,10 @@ def _do_review(contact_name: str, contact_wxid: str, llm_cfg: dict, config: dict
 
 
 def _handle_slash(command: str, config: dict, contact_name: str,
-                  contact_wxid: str, contact_memory, last_suggestion: str) -> str:
+                  contact_wxid: str, contact_memory, global_memory,
+                  last_suggestion: str) -> str:
     """处理 slash 命令。返回 "exit" 退出，"switch_contact" 切换，或 None 继续。"""
-    parts = command.split()
+    parts = command.split(maxsplit=2)
     cmd = parts[0].lower()
 
     if cmd in ("/h", "/help", "/?"):
@@ -1360,12 +1526,10 @@ def _handle_slash(command: str, config: dict, contact_name: str,
         else:
             if not state.monitor_thread or not state.monitor_thread.is_alive():
                 from agent.tools.monitor import _start_monitoring_raw
-                contacts_to_monitor = [c["wxid"] for c in config.get("contacts", [])
-                                       if c.get("auto_monitor", True)]
-                if not contacts_to_monitor:
-                    _print("  ⚠️  没有配置自动监听的联系人", style="yellow")
+                if not contact_wxid:
+                    _print("  ⚠️ 请先用 /contact <名称> 指定要监听的联系人", style="yellow")
                     return
-                t = _start_monitoring_raw(contacts_to_monitor)
+                t = _start_monitoring_raw([contact_wxid])
                 state.monitor_thread = t
                 state.monitor_running = True
             else:
@@ -1407,11 +1571,28 @@ def _handle_slash(command: str, config: dict, contact_name: str,
         if len(parts) < 2:
             _print("  用法: /voice auto 或 /voice manual", style="yellow")
         else:
-            mode = parts[1]
-            if contact_wxid:
-                from agent.tools.decode import set_voice_mode
-                set_voice_mode(contact_name, mode)
-            _print(f"  语音模式已切换为: {mode}", style="green")
+            from agent.tools.decode import set_voice_mode
+            result = set_voice_mode(parts[1])
+            _print(f"  全局语音模型: {result.get('data', {}).get('voice_mode', parts[1])}", style="green")
+
+    elif cmd == "/image":
+        if len(parts) < 2:
+            _print("  用法: /image auto 或 /image manual", style="yellow")
+        else:
+            from agent.tools.decode import set_image_mode
+            result = set_image_mode(parts[1])
+            _print(f"  全局图片模型: {result.get('data', {}).get('image_mode', parts[1])}", style="green")
+
+    elif cmd == "/media":
+        from agent.media_api import media_api_status, process_media_queue
+        target = parts[1] if len(parts) > 1 else "status"
+        if target == "status":
+            _print(str(media_api_status().get("data", {})), style="dim")
+        elif target in ("voice", "image"):
+            capability = "speech_to_text" if target == "voice" else "image_understanding"
+            _print(str(process_media_queue(capability, 10).get("data", {})), style="dim")
+        else:
+            _print("  用法: /media status | /media voice | /media image", style="yellow")
 
     elif cmd == "/contact":
         if len(parts) < 2:
@@ -1435,6 +1616,15 @@ def _handle_slash(command: str, config: dict, contact_name: str,
                 _print("  尚无记忆，开始对话后会自动积累", style="yellow")
         else:
             _print("  未设置活跃联系人", style="yellow")
+
+    elif cmd == "/global-memory":
+        content = " ".join(parts[1:]) if len(parts) > 1 else ""
+        if content:
+            entry = global_memory.remember(content)
+            _print(f"  🧠 已写入全局记忆: {entry}", style="green")
+        else:
+            text = global_memory.memory_text()
+            _print(f"\n  🧠 用户全局记忆:\n\n{text or '(尚无全局记忆，可用 /global-memory <内容> 添加)'}")
 
     elif cmd == "/save":
         if len(parts) < 2:
@@ -1466,6 +1656,43 @@ def _handle_slash(command: str, config: dict, contact_name: str,
                     _print(f"    {n.get('content', '')[:200]}", style="dim")
         else:
             _print(f"  ❌ {result.get('error')}", style="red")
+
+    elif cmd == "/history":
+        from agent.conversation_store import search_conversations
+        keyword = " ".join(parts[1:]) if len(parts) > 1 else ""
+        entries = search_conversations(keyword=keyword, contact_name=contact_name, limit=20)
+        if not entries:
+            _print("  没有匹配的自动保存对话", style="yellow")
+        else:
+            _print(f"\n  🔎 对话账本 — {len(entries)} 条:", style="cyan")
+            for entry in entries:
+                text = entry.get("content", "").replace("\n", " ")
+                _print(
+                    f"  [{entry.get('created_at', '')}] {entry.get('role', '?')} "
+                    f"{entry.get('entry_id', '')}: {text[:180]}",
+                    style="dim",
+                )
+
+    elif cmd == "/sessions":
+        from agent.conversation_store import list_conversation_sessions
+        sessions = list_conversation_sessions(limit=50)
+        if not sessions:
+            _print("  尚无自动保存的对话会话", style="yellow")
+        else:
+            _print(f"\n  🗂️ 已保存会话 — {len(sessions)} 项:", style="cyan")
+            for item in sessions:
+                key = item.get("source_sid") or item.get("session_key") or "?"
+                _print(
+                    f"  {key}｜{item.get('contact_name') or '未关联联系人'}｜"
+                    f"{item.get('entries', 0)} 条｜{item.get('last_at', '')}",
+                    style="dim",
+                )
+
+    elif cmd == "/restore":
+        if len(parts) < 2:
+            _print("  用法: /restore <Hub sid> [归档 JSONL 文件或 archives 目录]", style="yellow")
+        else:
+            return ("restore_hub", parts[1], parts[2] if len(parts) > 2 else "")
 
     elif cmd == "/skills":
         active = config.get("active_skills", [])

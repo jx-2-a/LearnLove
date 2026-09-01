@@ -74,8 +74,10 @@ python -m agent.loop --auto
 ```
 微信 DB (加密)
   → DBCache (解密缓存)
-  → 后台监听线程 / 按需查询
-  → 消息解码 (ZSTD/SILK→Whisper)
+  → 统一规范化解析（手动历史 / 增量检查 / 后台监听共用）
+  → 稳定排序去重 + 事实归档
+  → Agent 时间线（角色 / 正文 / 引用 / 媒体状态 / 证据 ID）
+  → 语音与图片归档 → 本地模型或远程 API 处理队列
   → 上下文组装 (系统提示词 + 记忆 + 技能 + 风格 + 近期聊天)
   → LLM API (OpenAI 兼容)
   → 工具调用循环 (28 tools)
@@ -108,6 +110,39 @@ LearnLove/
 
 用户数据全部存储在项目外的 `~/.learnlove_data/`，代码可安全提交 git。
 
+### 联系人、媒体与全局记忆
+
+启动时不会从 `contacts` 配置自动选中或监听任何人。先用 `/contact <名称>` 指定当前联系人，再用 `/a` 监听该联系人。语音和图片模型是服务用户本人的全局能力：`/voice auto`、`/image auto` 开启，`manual` 停用自动处理，`/media status` 查看条件，`/media voice` 或 `/media image` 处理已归档待办。
+
+`/global-memory <内容>` 会立即保存用户的跨联系人偏好、目标、边界、项目与决定；不带内容时查看。全局记忆会注入普通回复和咨询模式，不会混入某个联系人的关系档案。
+
+### 本地语音与识图模型
+
+LearnLove 现在独立管理本地媒体模型，不再依赖 `D:\Llama`。模型放在 `models/media/`，原生运行时放在 `runtime/media/`；两个目录均被 Git 忽略，提交时只包含代码、注册表、来源和校验信息。
+
+- 语音默认使用官方 `SenseVoiceSmall q8` 与 `llama-funasr-sensevoice.exe`，支持微信 SILK 自动解码后转写。
+- 图片默认使用 `Qwen2.5-VL-3B Q4_K_M`、匹配的 `mmproj Q8_0` 与 `llama-mtmd-cli.exe`。
+
+模型由 `agent/media_models.json` 注册，可在同一能力下增加其他模型，并通过 `LEARNLOVE_SPEECH_MODEL`、`LEARNLOVE_VISION_MODEL` 切换。缺少组件时，语音和图片仍会先归档并留在可重试队列，不会丢文件，也不会把占位符当成识别结果。可通过 `media_api_status` 查看本地条件、已注册处理器和待处理数量。完整来源、许可证、SHA-256 和扩展方法见 [MEDIA_MODELS.md](MEDIA_MODELS.md)。
+
+### 恢复 AgentHub 已完全归档的会话
+
+LearnLove 会把用户、助手、工具调用和自动监听消息追加保存到本地
+`archive/records.db`，不依赖 Hub 活动 Session。若 Hub 原实例已经“完全归档”并删除，先新建同一个 LearnLove Agent，然后输入：
+
+```text
+/restore 8
+```
+
+其中 `8` 是 Hub 归档卡对应的原 sid。LearnLove 会从同级
+`AgentHub/data/archives/8.jsonl` 导入记录、自动去重，并恢复 user/assistant 工作上下文；原归档保持只读，当前 Hub 使用新的 sid。AgentHub 位于其他目录时可传路径：
+
+```text
+/restore 8 D:\AgentHub\data\archives
+```
+
+也可以设置 `AGENT_HUB_ARCHIVE_DIR`。用 `/history 关键词` 搜索自动保存的对话，`/sessions` 查看可恢复来源；模型内部可使用 `search_conversation_history` 和 `read_conversation_history` 精确读取完整原文。
+
 ## 隐私
 
 - **所有数据存储在本地**，不会上传到任何服务器
@@ -130,6 +165,9 @@ LearnLove/
 | `/memory` | 查看长期记忆 |
 | `/save <内容>` | 把重要内容留档（时间点快照，之后可找回来） |
 | `/notes [关键词]` | 查看/搜索留档（含日期） |
+| `/history [关键词]` | 搜索自动保存的全部 LearnLove 对话 |
+| `/restore <sid> [路径]` | 导入 Hub 永久归档并恢复工作上下文 |
+| `/sessions` | 查看本地保存与可恢复的会话来源 |
 | `/clear` | 清除对话历史 |
 | `/h` | 帮助 |
 

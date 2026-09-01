@@ -1,8 +1,8 @@
 """
 复盘报告工具 — list_reviews / read_review
 
-供咨询模式回顾历史复盘报告。报告文件保存在 {USER_DATA_DIR}/reviews/ 下，
-文件名格式: {联系人}_{YYYYMMDD}_{HHMMSS}.md（由 chat.py 的 /review 生成）。
+供咨询模式回顾历史复盘报告。新报告保存在 {USER_DATA_DIR}/reviews/{联系人}/ 下；
+根目录的旧报告仍会被读取，方便平滑迁移。
 """
 
 import os
@@ -38,16 +38,19 @@ def _scan_reviews() -> list[dict]:
     files = []
     if not os.path.isdir(d):
         return files
-    for fname in os.listdir(d):
-        if not fname.endswith(".md"):
-            continue
-        meta = _parse_filename(fname)
-        files.append({
-            "filename": fname,
-            "path": os.path.join(d, fname),
-            "contact": meta["contact"],
-            "time": meta["time"],
-        })
+    for root, _, names in os.walk(d):
+        for fname in names:
+            if not fname.endswith(".md"):
+                continue
+            meta = _parse_filename(fname)
+            relative = os.path.relpath(os.path.join(root, fname), d)
+            folder_contact = "" if root == d else os.path.basename(root)
+            files.append({
+                "filename": relative,
+                "path": os.path.join(root, fname),
+                "contact": folder_contact or meta["contact"],
+                "time": meta["time"],
+            })
     files.sort(key=lambda f: f["time"], reverse=True)
     return files
 

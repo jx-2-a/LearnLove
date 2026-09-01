@@ -237,6 +237,7 @@ def initialize(config: dict):
     state.setup(db_dir, keys_file)
     state.load_contacts()
     state.config = config
+    state.load_media_preferences()
 
     print(f"    DBCache 就绪 ({len(state.db_cache.all_keys)} 个加密数据库)")
     print(f"    已加载 {len(state.contacts)} 个联系人")
@@ -247,21 +248,6 @@ def initialize(config: dict):
     active = config.get("active_skills", [])
     skillmgr.load(skills_path, active)
     print(f"    SkillManager: {len(skillmgr._skills)} 个技能已加载, 活跃: {active}")
-
-    # 验证配置的联系人存在
-    contacts_cfg = config.get("contacts", [])
-    for c in contacts_cfg:
-        wxid = c.get("wxid", "")
-        name = c.get("name", "")
-        if wxid not in state.contacts:
-            found_wxid, found_name = state.resolve_contact(name)
-            if found_wxid:
-                print(f"    {name} → wxid: {found_wxid}")
-                c["wxid"] = found_wxid
-            else:
-                print(f"    [!] 未在联系人列表中找到: {name} ({wxid})")
-        else:
-            print(f"    ✓ {name}")
 
     return state
 
@@ -326,46 +312,11 @@ def main():
 
     # 守护模式
     if args.daemon:
-        print("[*] 守护模式：启动后台监控...")
-        from agent.tools._state import state as st
-        monitor_contacts = [
-            c["wxid"] for c in config.get("contacts", [])
-            if c.get("auto_monitor", True)
-        ]
-        if not monitor_contacts:
-            print("[!] 没有配置自动监听的联系人")
-            sys.exit(1)
-
-        from agent.tools.monitor import _start_monitoring_raw
-        t = _start_monitoring_raw(monitor_contacts)
-        print(f"[*] 监听已启动: {', '.join(monitor_contacts)}")
-        print(f"[*] 消息写入: {st.live_feed_path}")
-        print(f"[*] Ctrl+C 停止")
-
-        try:
-            while t.is_alive():
-                t.join(1)
-        except KeyboardInterrupt:
-            print("\n[*] 停止监听...")
-            st.monitor_running = False
-        return
+        print("[!] 守护模式不再读取固定 contacts；请在交互模式用 /contact 后再 /a 启动监听")
+        sys.exit(2)
 
     # REPL 模式
     from agent.chat import run_chat
-
-    # 如果配置启用了 auto
-    if config.get("agent", {}).get("auto", {}).get("enabled", False):
-        contacts_to_monitor = [
-            c["wxid"] for c in config.get("contacts", [])
-            if c.get("auto_monitor", True)
-        ]
-        if contacts_to_monitor:
-            from agent.tools.monitor import _start_monitoring_raw
-            from agent.tools._state import state as st
-            t = _start_monitoring_raw(contacts_to_monitor)
-            st.monitor_thread = t
-            st.monitor_running = True
-            print("[*] 自动监听模式已启动")
 
     run_chat(config)
 

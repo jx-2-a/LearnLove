@@ -11,9 +11,65 @@
 """
 
 import os
+import math
 from datetime import datetime
 
 from agent.paths import lessons_path as _lessons_path
+
+
+def estimate_text_tokens(text: str) -> int:
+    """保守估算中英混合文本 token 数，不依赖特定模型 tokenizer。"""
+    text = str(text or "")
+    cjk = 0
+    other = 0
+    for char in text:
+        code = ord(char)
+        if (0x3400 <= code <= 0x9FFF or 0xF900 <= code <= 0xFAFF
+                or 0x3040 <= code <= 0x30FF or 0xAC00 <= code <= 0xD7AF):
+            cjk += 1
+        else:
+            other += 1
+    return cjk + math.ceil(other / 4)
+
+
+def estimate_messages_tokens(messages: list[dict]) -> int:
+    """估算消息列表的输入 token，包含角色和协议包装开销。"""
+    total = 0
+    for message in messages or []:
+        total += 8
+        total += estimate_text_tokens(message.get("content") or "")
+        total += estimate_text_tokens(message.get("reasoning_content") or "")
+        if message.get("tool_calls"):
+            import json
+            total += estimate_text_tokens(json.dumps(
+                message["tool_calls"], ensure_ascii=False, default=str,
+            ))
+    return total
+
+
+def resolve_context_window(llm_config: dict, context_config: dict | None = None) -> int:
+    """解析模型上下文窗口；默认优先采用模型档案，旧 8K 配置不再误限流。"""
+    llm_config = llm_config or {}
+    context_config = context_config or {}
+    model_limit = int(llm_config.get("max_context_tokens") or 0)
+    configured_limit = int(context_config.get("max_context_tokens") or 0)
+    use_model_limit = context_config.get("use_model_context_window", True)
+
+    if use_model_limit and model_limit > 0:
+        return model_limit
+    if configured_limit > 0:
+        return configured_limit
+    if model_limit > 0:
+        return model_limit
+    return 8000
+
+
+def input_token_budget(llm_config: dict, context_config: dict | None = None) -> int:
+    """从总窗口扣除最大输出和协议安全余量，得到可用输入预算。"""
+    window = resolve_context_window(llm_config, context_config)
+    output = max(1, int((llm_config or {}).get("max_tokens") or 4096))
+    safety = max(2048, math.ceil(window * 0.02))
+    return max(1024, window - output - safety)
 
 
 def _load_system_prompt_template() -> str:
@@ -95,6 +151,7 @@ class ContextBuilder:
     def build_system_messages(self, contact_name: str = "",
                                contact_wxid: str = "",
                                memory_text: str = "",
+                               global_memory_text: str = "",
                                skill_modifiers: str = "") -> list[dict]:
         """构建系统消息层（可多条，避免单条过长）"""
         now = datetime.now()
@@ -112,10 +169,13 @@ class ContextBuilder:
         # Layer 2: 技能上下文
         skill_context = skill_modifiers if skill_modifiers else ""
 
-        # Layer 3: 记忆上下文
+        # Layer 3: 用户全局记忆与联系人记忆
         memory_context = ""
+        if global_memory_text:
+            memory_context = f"## 用户全局记忆（跨联系人、跨咨询模式）\n{global_memory_text}"
         if memory_text:
-            memory_context = f"## 长期记忆（关于 {contact_name}）\n{memory_text}"
+            personal = f"## 长期记忆（关于 {contact_name}）\n{memory_text}"
+            memory_context = f"{memory_context}\n\n{personal}" if memory_context else personal
 
         # Layer 4: 经验教训（per-contact，每次动态加载）
         lessons_context = _load_lessons(contact_name)
@@ -132,13 +192,24 @@ class ContextBuilder:
             style_context=style_context,
         )
 
-        return [{"role": "system", "content": system_content}]
+        messages = [{"role": "system", "content": system_content}]
+        if contact_name:
+            try:
+                from agent.archive import recent_events_context
+                event_context = recent_events_context(contact_name)
+                if event_context:
+                    messages.append({"role": "system", "content": event_context})
+            except Exception:
+                # 归档损坏不能阻断基础聊天；工具调用时会返回明确错误。
+                pass
+        return messages
 
     def build_context(self, contact_name: str, contact_wxid: str,
                       new_message: dict | None = None,
                       new_messages: list[dict] | None = None,
                       recent_history: list[dict] = None,
                       memory_text: str = "",
+                      global_memory_text: str = "",
                       skill_modifiers: str = "",
                       max_tokens: int = 8000) -> list[dict]:
         """组装完整上下文
@@ -150,6 +221,7 @@ class ContextBuilder:
             new_messages: 批量新消息列表，每条 {"sender": str, "content": str, "time": str}
             recent_history: 最近的对话历史（作为参考背景）
             memory_text: 长期记忆内容
+            global_memory_text: 用户本人跨联系人的长期记忆内容
             skill_modifiers: 活跃技能的 prompt_modifier 拼接
             max_tokens: token 预算上限
 
@@ -160,6 +232,7 @@ class ContextBuilder:
             contact_name=contact_name,
             contact_wxid=contact_wxid,
             memory_text=memory_text,
+            global_memory_text=global_memory_text,
             skill_modifiers=skill_modifiers,
         )
 
@@ -213,29 +286,15 @@ class ContextBuilder:
         return messages
 
     def _format_history(self, history: list[dict], max_tokens: int) -> str:
-        """格式化近期对话历史，控制长度"""
-        budget_chars = max_tokens * 2  # 中文约 2 chars/token
+        """完整格式化对话历史；预算控制由上层保真压缩负责。"""
         lines = []
-        total = 0
-
-        for entry in reversed(history):
+        for entry in history:
             sender = entry.get("sender", "?")
             content = entry.get("content", "")
             line = f"[{entry.get('time', '')}] {sender}: {content}"
-            total += len(line)
-            if total > budget_chars * 0.7:  # 用 70% 给注入的系统消息留空间
-                break
             lines.append(line)
-
-        lines.reverse()
-
-        # 如果历史被截断，加标记
-        if len(lines) < len(history):
-            lines.insert(0, f"[更早的对话已省略，共 {len(history)} 条]")
-
         return "\n".join(lines)
 
     def estimate_tokens(self, messages: list[dict]) -> int:
-        """快速估算 token 数（中文约 chars/2.5）"""
-        total_chars = sum(len(m.get("content", "")) for m in messages)
-        return int(total_chars / 2.5)
+        """保守估算中英混合消息 token 数。"""
+        return estimate_messages_tokens(messages)

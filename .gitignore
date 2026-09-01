@@ -25,6 +25,10 @@ agent/config.yaml
 *.local.yaml
 *_local.yaml
 
+# Local AI assets — models and native runtimes are installed per machine
+models/
+runtime/
+
 # OS
 .DS_Store
 Thumbs.db

@@ -15,6 +15,7 @@ models:
     reasoning_effort: high
     temperature: 0.7
     max_tokens: 8192
+    max_context_tokens: 1000000
     params: [thinking, reasoning_effort, temperature, max_tokens]
 
   deepseek-v4-pro:
@@ -28,6 +29,7 @@ models:
     reasoning_effort: high
     temperature: 0.7
     max_tokens: 8192
+    max_context_tokens: 1000000
     params: [thinking, reasoning_effort, temperature, max_tokens]
 
   deepseek-chat:
@@ -40,6 +42,7 @@ models:
     thinking: false
     temperature: 0.7
     max_tokens: 8192
+    max_context_tokens: 1000000
     params: [thinking, temperature, max_tokens]
 
   deepseek-reasoner:
@@ -53,6 +56,7 @@ models:
     reasoning_effort: high
     temperature: 0.7
     max_tokens: 8192
+    max_context_tokens: 1000000
     params: [thinking, reasoning_effort, temperature, max_tokens]
 
   tju-qwen36-35b-a3b:

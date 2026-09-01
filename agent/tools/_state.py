@@ -95,7 +95,9 @@ class AgentState:
     """全局共享状态单例"""
 
     def __init__(self):
-        from agent.paths import live_feed_path, monitor_state_path, voice_cache_dir
+        from agent.paths import (
+            live_feed_path, media_preferences_path, monitor_state_path, voice_cache_dir,
+        )
 
         self.db_cache: DBCache | None = None
         self.contacts: dict = {}           # {wxid: {nick, remark, display, alias}}
@@ -106,11 +108,42 @@ class AgentState:
         self.live_feed_path: str = live_feed_path()
         self.monitor_state_path: str = monitor_state_path()
         self.voice_cache_dir: str = voice_cache_dir()
+        self.media_preferences_path: str = media_preferences_path()
         self.active_contact_wxid: str | None = None
         self.active_contact_name: str = ""
 
         # 配置引用（由 loop.py 设置）
         self.config: dict = {}
+
+    def media_mode(self, kind: str) -> str:
+        """读取全局媒体模式；默认手动，避免未授权的重型自动推理。"""
+        key = f"{kind}_mode"
+        configured = (self.config.get("media", {}) or {}).get(key, "manual")
+        return "auto" if configured in ("auto", "api") else "manual"
+
+    def set_media_mode(self, kind: str, mode: str) -> str:
+        """更新并持久化全局语音或识图模式。"""
+        if kind not in ("voice", "image"):
+            raise ValueError("媒体类型必须是 voice 或 image")
+        normalized = "auto" if mode in ("auto", "api") else "manual"
+        if mode not in ("auto", "api", "manual"):
+            raise ValueError("模式必须是 auto 或 manual")
+        self.config.setdefault("media", {})[f"{kind}_mode"] = normalized
+        os.makedirs(os.path.dirname(self.media_preferences_path), exist_ok=True)
+        with open(self.media_preferences_path, "w", encoding="utf-8") as file:
+            json.dump(self.config["media"], file, ensure_ascii=False, indent=2)
+        return normalized
+
+    def load_media_preferences(self) -> None:
+        """加载命令写入的本机媒体模式，覆盖配置中的默认值。"""
+        if not os.path.exists(self.media_preferences_path):
+            return
+        try:
+            saved = json.load(open(self.media_preferences_path, encoding="utf-8"))
+            if isinstance(saved, dict):
+                self.config.setdefault("media", {}).update(saved)
+        except (OSError, json.JSONDecodeError):
+            pass
 
     def setup(self, db_dir: str, keys_file: str):
         """初始化：加载密钥、创建 DBCache"""
@@ -173,14 +206,12 @@ class AgentState:
         return None
 
     def voice_mode(self, wxid: str) -> str:
-        """获取某联系人的语音处理模式 (auto/manual)"""
-        cfg = self.contact_config(wxid)
-        return cfg.get("voice_mode", "auto") if cfg else "auto"
+        """兼容旧调用：语音处理已改为服务用户的全局模式。"""
+        return self.media_mode("voice")
 
     def whisper_model_name(self, wxid: str) -> str:
-        """获取某联系人的 whisper 模型名"""
-        cfg = self.contact_config(wxid)
-        return cfg.get("whisper_model", "small") if cfg else "small"
+        """已废弃：本地 Whisper 已停用，仅为旧扩展保留兼容返回值。"""
+        return ""
 
     def load_state(self) -> dict:
         """加载监控状态"""
