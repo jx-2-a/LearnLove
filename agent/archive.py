@@ -51,6 +51,14 @@ CREATE INDEX IF NOT EXISTS idx_conversation_session ON conversation_entries(sess
 CREATE INDEX IF NOT EXISTS idx_conversation_contact ON conversation_entries(contact_name,created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_source_event
  ON conversation_entries(source,source_sid,source_event_id) WHERE source_event_id != '';
+CREATE TABLE IF NOT EXISTS relationship_signals (
+ signal_id TEXT PRIMARY KEY, contact_name TEXT NOT NULL, observed_at TEXT NOT NULL,
+ dimension TEXT NOT NULL, direction INTEGER NOT NULL, confidence TEXT NOT NULL,
+ evidence_json TEXT DEFAULT '[]', alternatives_json TEXT DEFAULT '[]',
+ trigger_text TEXT DEFAULT '', recommended_action TEXT DEFAULT '',
+ source_message_ids_json TEXT DEFAULT '[]', created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_relationship_signals_contact_time
+ ON relationship_signals(contact_name,observed_at DESC);
 """
 
 
@@ -167,6 +175,96 @@ def recent_events_context(contact_name: str, limit: int = 5) -> str:
     return "\n".join(lines)
 
 
+RELATIONSHIP_DIMENSIONS = {
+    "mutuality": "互动互惠",
+    "emotional_safety": "情绪安全",
+    "repair_willingness": "修复意愿",
+    "closeness_investment": "亲近/投入",
+    "communication_pressure": "沟通压力",
+}
+
+
+def record_relationship_signal(contact_name: str, dimension: str, direction: int,
+                               evidence=None, alternatives=None, trigger_text: str = "",
+                               recommended_action: str = "", confidence: str = "low",
+                               observed_at: str = "", source_message_ids=None) -> dict:
+    """记录一条可复核的关系信号；方向是变化，不是对对方感情的断言。"""
+    if dimension not in RELATIONSHIP_DIMENSIONS:
+        raise ValueError("dimension 必须是: " + ", ".join(RELATIONSHIP_DIMENSIONS))
+    direction = int(direction)
+    if direction not in (-2, -1, 0, 1, 2):
+        raise ValueError("direction 必须为 -2、-1、0、1、2")
+    if confidence not in ("low", "medium", "high"):
+        raise ValueError("confidence 必须为 low、medium 或 high")
+    now = _now()
+    data = (f"sig_{uuid.uuid4().hex}", contact_name or "自己", observed_at or now,
+            dimension, direction, confidence, json.dumps(evidence or [], ensure_ascii=False),
+            json.dumps(alternatives or [], ensure_ascii=False), trigger_text.strip(),
+            recommended_action.strip(), json.dumps(source_message_ids or [], ensure_ascii=False), now)
+    with connect() as conn:
+        conn.execute("""INSERT INTO relationship_signals
+          (signal_id,contact_name,observed_at,dimension,direction,confidence,evidence_json,
+           alternatives_json,trigger_text,recommended_action,source_message_ids_json,created_at)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", data)
+    return {"signal_id": data[0], "dimension": dimension, "direction": direction}
+
+
+def relationship_dashboard(contact_name: str, limit: int = 30) -> dict:
+    """汇总近期信号为趋势仪表盘；结果仅供复核，不生成单一好感度。"""
+    with connect() as conn:
+        rows = conn.execute("""SELECT * FROM relationship_signals WHERE contact_name=?
+          ORDER BY observed_at DESC,created_at DESC LIMIT ?""",
+          (contact_name, max(1, min(int(limit), 100)))).fetchall()
+    signals = []
+    grouped = {key: [] for key in RELATIONSHIP_DIMENSIONS}
+    for row in rows:
+        item = dict(row)
+        item["evidence"] = json.loads(item.pop("evidence_json") or "[]")
+        item["alternatives"] = json.loads(item.pop("alternatives_json") or "[]")
+        item["source_message_ids"] = json.loads(item.pop("source_message_ids_json") or "[]")
+        signals.append(item)
+        grouped[item["dimension"]].append(item)
+    dimensions = {}
+    for key, items in grouped.items():
+        recent = list(reversed(items[:5]))
+        if not recent:
+            dimensions[key] = {"label": RELATIONSHIP_DIMENSIONS[key], "state": "信号不足", "count": 0}
+            continue
+        average = sum(item["direction"] for item in recent) / len(recent)
+        if key == "communication_pressure":
+            state = "压力上升" if average >= 0.75 else "压力下降" if average <= -0.75 else "波动/待观察"
+        else:
+            state = "上升" if average >= 0.75 else "下降" if average <= -0.75 else "波动/待观察"
+        dimensions[key] = {"label": RELATIONSHIP_DIMENSIONS[key], "state": state,
+                           "average": round(average, 2), "count": len(recent),
+                           "latest": recent[-1]}
+    alerts = []
+    pressure = dimensions["communication_pressure"]
+    investment = dimensions["closeness_investment"]
+    repair = dimensions["repair_willingness"]
+    if pressure.get("average", 0) >= 0.75 and (investment.get("average", 0) <= -0.75 or repair.get("average", 0) <= -0.75):
+        alerts.append("预警：压力上升且投入或修复意愿下降；应结合触发事件安排一次真诚、非逼迫的澄清。")
+    elif any(value.get("average", 0) <= -0.75 for key, value in dimensions.items() if key != "communication_pressure"):
+        alerts.append("提醒：出现持续下降信号；先核对人物处境、事件链与其他解释，不要急于给关系下结论。")
+    return {"contact": contact_name, "dimensions": dimensions, "alerts": alerts,
+            "signals": signals[:10], "disclaimer": "趋势来自已记录信号，不是好感度或读心结论。"}
+
+
+def recent_relationship_signals_context(contact_name: str) -> str:
+    """生成精简趋势上下文，提醒模型先核对证据再提出行动。"""
+    dashboard = relationship_dashboard(contact_name, limit=12)
+    if not dashboard["signals"]:
+        return ""
+    lines = ["## 关系信号趋势（待核实，不是结论）"]
+    for value in dashboard["dimensions"].values():
+        if value.get("count"):
+            lines.append(f"- {value['label']}：{value['state']}（{value['count']} 条已记录信号）")
+    for alert in dashboard["alerts"]:
+        lines.append(f"- {alert}")
+    lines.append("使用前先检查本次情节是否改变了旧判断，不得把趋势当作对方内心事实。")
+    return "\n".join(lines)
+
+
 def upsert_media(item: dict, capability: str) -> dict:
     """保存媒体记录，并为本地/API 处理器创建幂等待处理任务。"""
     now = _now()
@@ -189,9 +287,11 @@ def upsert_media(item: dict, capability: str) -> dict:
     return {"media_id":media_id,"job_id":job_id,"status":"pending"}
 
 
-def pending_media_jobs(capability: str = "", limit: int = 20) -> list[dict]:
-    """返回等待语音或识图处理器执行的任务。"""
-    where, params = "WHERE j.status IN ('pending','failed')", []
+def pending_media_jobs(capability: str = "", limit: int = 20,
+                       include_failed: bool = True) -> list[dict]:
+    """返回待处理任务；自动处理不重复执行已失败任务，手动补跑才会重试。"""
+    statuses = "('pending','failed')" if include_failed else "('pending')"
+    where, params = f"WHERE j.status IN {statuses}", []
     if capability:
         where += " AND j.capability=?"
         params.append(capability)

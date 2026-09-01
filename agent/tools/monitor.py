@@ -18,6 +18,23 @@ from agent.tools.message import (
 from agent.wechat_parser import normalize_message
 
 
+def _process_new_auto_media() -> None:
+    """处理本轮新归档媒体；只消费 pending 任务，避免失败图片反复占用监听线程。"""
+    from agent.media_api import process_media_queue
+
+    modes = (
+        ("voice", "speech_to_text"),
+        ("image", "image_understanding"),
+    )
+    for kind, capability in modes:
+        if state.media_mode(kind) != "auto":
+            continue
+        try:
+            process_media_queue(capability, limit=10, retry_failed=False)
+        except Exception as exc:
+            print(f"[monitor] 自动{kind}处理异常: {exc}")
+
+
 def _collect_contact_messages(wxid: str, display: str, stored_state: dict) -> list[dict]:
     """收集一个联系人的增量消息，并用稳定 ID 处理同秒边界与跨库重复。"""
     state_key = f"last_ts_{wxid}"
@@ -82,6 +99,7 @@ def _collect_contact_messages(wxid: str, display: str, stored_state: dict) -> li
     upsert_messages(messages)
     for message in messages:
         archive_message_media(message)
+    _process_new_auto_media()
     media = media_results_for_messages(
         [message["message_id"] for message in messages]
     )

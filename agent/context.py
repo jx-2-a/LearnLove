@@ -199,6 +199,14 @@ class ContextBuilder:
                 event_context = recent_events_context(contact_name)
                 if event_context:
                     messages.append({"role": "system", "content": event_context})
+                from agent.archive import recent_relationship_signals_context
+                signal_context = recent_relationship_signals_context(contact_name)
+                if signal_context:
+                    messages.append({"role": "system", "content": signal_context})
+                from agent.message_analytics import recent_message_trend_context
+                trend_context = recent_message_trend_context(contact_name)
+                if trend_context:
+                    messages.append({"role": "system", "content": trend_context})
             except Exception:
                 # 归档损坏不能阻断基础聊天；工具调用时会返回明确错误。
                 pass

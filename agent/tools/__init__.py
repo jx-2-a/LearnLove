@@ -11,9 +11,12 @@ from datetime import datetime
 
 # 直接导入 — 工具模块
 from agent.tools.contact import find_contact, list_contacts, switch_contact
-from agent.tools.message import get_chat_history, check_new_messages, search_messages, get_live_feed
+from agent.tools.message import get_chat_history, check_new_messages, search_messages, get_live_feed, backfill_contact_history
 from agent.tools.decode import decode_voice, batch_decode_voices, set_voice_mode
 from agent.tools.event import record_event, view_events
+from agent.tools.relationship import record_relationship_signal_tool, get_relationship_dashboard
+from agent.tools.analytics import get_message_statistics, get_message_rollup
+from agent.tools.stage import record_stage_analysis, view_stage_analyses, read_stage_analysis
 from agent.tools.conversation import (
     import_hub_conversation,
     list_saved_conversations,
@@ -453,6 +456,15 @@ TOOL_MAP = {
     # 事件/故事（自动注入近期摘要，保留修订历史和证据消息 ID）
     "record_event": record_event,
     "view_events": view_events,
+    # 关系信号与趋势（证据、替代解释、置信度分层）
+    "record_relationship_signal": record_relationship_signal_tool,
+    "get_relationship_dashboard": get_relationship_dashboard,
+    "get_message_statistics": get_message_statistics,
+    "get_message_rollup": get_message_rollup,
+    "record_stage_analysis": record_stage_analysis,
+    "view_stage_analyses": view_stage_analyses,
+    "read_stage_analysis": read_stage_analysis,
+    "backfill_contact_history": backfill_contact_history,
     # 表达翻译
     "express_translate": _express_translate_handler,
     # 技能管理

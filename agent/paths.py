@@ -120,6 +120,13 @@ def reviews_dir() -> str:
     return os.path.join(get_user_data_dir(), "reviews")
 
 
+def analysis_stage_dir(name: str = "") -> str:
+    """返回联系人阶段分析底稿目录，和原始消息、事件、复盘分层保存。"""
+    root = os.path.join(get_user_data_dir(), "analysis_stages")
+    safe_name = str(name or "自己").replace("/", "_").replace("\\", "_")
+    return os.path.join(root, safe_name)
+
+
 def contact_reviews_dir(name: str) -> str:
     """返回某联系人的独立复盘报告目录。"""
     safe_name = str(name or "未分类").replace("/", "_").replace("\\", "_")

@@ -101,6 +101,7 @@ review:
 # --- 可选: 活跃技能 ---
 active_skills:
   - warm_caring
+  - relationship_trend_calibration
   # - humorous
   # - conflict_resolution
   # - first_date

@@ -176,12 +176,17 @@ def _print_help():
 | `/file <路径>` | 读取本地文本文件 |
 | `/copy` | 复制最后一条建议到剪贴板 |
 | `/send` | 自动发送最后一条建议（需阀门 L2） |
-| `/voice <auto|manual>` | 启用/停用全局语音模型自动转写 |
-| `/image <auto|manual>` | 启用/停用全局图片理解模型 |
-| `/media [status|voice|image]` | 查看状态或处理媒体待办队列 |
+| `/voice` | 查看语音自动转写状态；`/voice auto` 开启，`/voice manual` 关闭自动处理 |
+| `/image` | 查看图片自动理解状态；`/image auto` 开启，`/image manual` 关闭自动处理 |
+| `/media` | 查看两项状态；`/media voice` 或 `/media image` 手动处理已归档的待办 |
 | `/contact <名称>` | 指定当前联系人；启动默认不选择任何人 |
 | `/memory` | 查看当前联系人的长期记忆 |
 | `/global-memory [内容]` | 查看或写入服务用户本人的全局记忆 |
+| `/event <叙述>` | 结构化留存一个重要事件或故事，保留叙述原貌 |
+| `/events [关键词]` | 查看或检索当前联系人的事件/故事 |
+| `/status` | 查看关系信号趋势、预警及其证据（不是好感总分） |
+| `/stats [天数]` | 比较近期与前一阶段的消息量、长短句、媒体和短语变化 |
+| `/backfill [天数]` | 将当前联系人近 180 天的历史消息补入统计库，不批量复制媒体 |
 | `/save <内容>` | 把重要内容留档（时间点快照，之后可找回来） |
 | `/notes [关键词]` | 查看/搜索留档（含日期） |
 | `/history [关键词]` | 搜索 LearnLove 自动保存的全部对话 |
@@ -668,27 +673,38 @@ def run_chat(config: dict, session=None):
                         )
                         continue
 
-                    # 语音消息处理
+                    # 自动媒体处理已在监听线程中入队并完成；把成功结果回填给上下文。
                     if entry_type == 34:
+                        media = entry.get("media") or {}
+                        if media.get("status") == "completed" and media.get("result"):
+                            entry_content = f"[语音转写] {media['result']}"
+                        else:
+                            entry_wxid = entry.get("wxid", "")
+                            voice_cfg = state.voice_mode(entry_wxid)
+                            if voice_cfg == "manual":
+                                entry_content = "[语音已归档，自动转写关闭]"
+                            else:
+                                entry_content = "[语音正在自动转写，结果稍后可用]"
+
+                    if entry_type == 3:
+                        media = entry.get("media") or {}
+                        if media.get("status") == "completed" and media.get("result"):
+                            entry_content = f"[图片理解] {media['result']}"
+                        elif state.media_mode("image") == "manual":
+                            entry_content = "[图片已归档，自动理解关闭]"
+                        elif media.get("error"):
+                            entry_content = f"[图片已归档，自动理解未完成：{media['error']}]"
+                        else:
+                            entry_content = "[图片正在自动理解，结果稍后可用]"
+
+                    # 兼容非监听来源的语音消息：只归档，不在主循环同步阻塞推理。
+                    if entry_type == 34 and not (entry.get("media") or {}).get("result"):
                         entry_wxid = entry.get("wxid", "")
                         voice_cfg = state.voice_mode(entry_wxid)
                         if voice_cfg == "manual":
-                            _print("  🎤 语音消息 — 手动模式，跳过", style="yellow")
-                            continue
+                            _print("  🎤 语音已归档，自动转写关闭", style="yellow")
                         else:
-                            _print("  🎤 正在转录语音...", style="dim")
-                            try:
-                                from agent.tools.decode import decode_voice
-                                vresult = decode_voice(contact_name=entry_contact, message_ts=entry.get("create_time", 0))
-                                if vresult.get("ok"):
-                                    entry_content = vresult["data"].get("text", entry_content)
-                                    _print(f"  🎤 转录: {entry_content[:100]}", style="dim")
-                                else:
-                                    _print(f"  🎤 转录失败: {vresult.get('error', '未知')}", style="red")
-                                    continue
-                            except Exception as e:
-                                _print(f"  🎤 转录异常: {e}", style="red")
-                                continue
+                            _print("  🎤 语音正在后台自动转写", style="dim")
 
                     # 确定联系人
                     msg_wxid = entry.get("wxid", "")
@@ -1172,10 +1188,21 @@ COACH_SYSTEM_PROMPT = """你是 LearnLove Agent 的咨询教练模式。你不�
 - 可以质疑用户的想法，但保持尊重
 - 引用具体例子来说明观点
 
+## 关系判断纪律
+- 你是教练和倾听者，不是只会代写回复的旁观者。先解释看到了什么信号、它可能意味着什么，再教用户下一步如何判断和行动。
+- 严格分开「事实、推断、未知」。任何“她还喜欢/不喜欢、只是慢热、不会分手”都只能是带证据和置信度的假设，不能当结论安慰用户。
+- 每次关系走向判断至少检查反证和时间趋势：互动是否互惠、是否愿意修复、是否出现持续疲惫/回避/边界表达。单次热络或冷淡都不足以下结论。
+- 黄灯不是固定的“降压”指令。先还原人物、关系阶段、最近事件、压力源和触发链：它可能需要空间，也可能需要共情陪伴、一次真诚澄清或共同解决现实问题。出现红灯（明确不适、躲避沟通、拒绝或要求停止）时，建议真诚澄清、尊重边界，并准备后退止损。不要用“没事”“再等等”掩盖风险。
+- 解释行动背后的原则，让用户逐渐学会自己感受场景、回应情绪、提出需求和保护边界；不教操控、试探或一味迁就。
+- 不按性别刻板印象读心。若用户提到性别差异，只可把它作为询问具体偏好、成长经历与当前情境的线索，仍以这个人的原话和行为为准。
+
 ## 工具与沉淀
 - 需要回顾历史复盘时，用 list_reviews 查看有哪些报告，read_review 读取内容
+- 发现会改变后续判断的互动趋势时，用 record_relationship_signal 留下证据、其他解释、触发链和置信度；查看全貌时用 get_relationship_dashboard，不把仪表盘当成读心结论
+- 用户询问长期状态、阶段变化，或近期表现与旧记忆冲突时，先用 get_message_statistics 核对相邻时段的客观变化，再结合事件链解释
 - 讨论出对后续沟通有长期价值的原则、教训、行动方案时，用 record_lesson 记录（记得带 contact_name）。会自动沉淀到 lessons.json，后续聊天自动参考
 - 用户讲述完整事件/故事时用 record_event：保留完整叙述、事实、情绪、不确定项和证据消息 ID，近期事件摘要会进入后续分析
+- 发现对未来判断有价值的关系变化时，用 record_relationship_signal 记录维度、可见证据、其他解释、触发链和置信度；禁止只写“慢热/不爱了”等标签。需要总览时用 get_relationship_dashboard
 - 一般感受、想法、做法或共同创造物想留档时用 record_note；它是时间点快照，不自动注入
 - 不要为记录而记录，只记真正有价值的发现
 
@@ -1218,6 +1245,7 @@ REVIEW_SYSTEM_PROMPT = """你是一个专业的聊天复盘教练。你的任务
    - ⚠️ 可以改进的（具体指出哪句话/哪个回应可以更好，怎么改）
 4. **关键教训**: 从这段对话中能学到什么？1-3 条 actionable 的建议
 5. **后续建议**: 接下来 1-3 天怎么跟进？该主动还是该等？
+6. **信号与决策点**: 标出绿/黄/红灯、证据与反证；说明何时应该真诚沟通，何时应降低投入或停止追逐。
 
 ## 风格要求
 - 直接、有用、不讨好
@@ -1226,6 +1254,7 @@ REVIEW_SYSTEM_PROMPT = """你是一个专业的聊天复盘教练。你的任务
 - 如果用户做得好，具体说明哪里好
 - 关注"用户能控制的事"，不纠结对方怎么想
 - 如果提供了「上文回顾」，注意前后关联，指出变化和趋势
+- 不用“慢热”“性格如此”等标签替代证据；不确定时明确说不确定，并给一个尊重双方边界的验证动作
 
 ## 输出格式
 用清晰的分段，每段有小标题。总长度不超过 600 字。"""
@@ -1569,25 +1598,49 @@ def _handle_slash(command: str, config: dict, contact_name: str,
 
     elif cmd == "/voice":
         if len(parts) < 2:
-            _print("  用法: /voice auto 或 /voice manual", style="yellow")
+            mode = state.media_mode("voice")
+            label = "已开启（新语音将自动转写）" if mode == "auto" else "已关闭自动转写（语音仍会归档，可用 /media voice 手动处理）"
+            _print(f"  🎙️ 语音自动转写：{label}", style="cyan")
         else:
             from agent.tools.decode import set_voice_mode
             result = set_voice_mode(parts[1])
-            _print(f"  全局语音模型: {result.get('data', {}).get('voice_mode', parts[1])}", style="green")
+            if result.get("ok"):
+                mode = result["data"]["voice_mode"]
+                label = "已开启" if mode == "auto" else "已关闭自动转写"
+                _print(f"  🎙️ 语音自动转写：{label}", style="green")
+            else:
+                _print(f"  ❌ {result.get('error')}", style="red")
 
     elif cmd == "/image":
         if len(parts) < 2:
-            _print("  用法: /image auto 或 /image manual", style="yellow")
+            mode = state.media_mode("image")
+            label = "已开启（新图片将自动理解）" if mode == "auto" else "已关闭自动理解（图片仍会归档，可用 /media image 手动处理）"
+            _print(f"  🖼️ 图片自动理解：{label}", style="cyan")
         else:
             from agent.tools.decode import set_image_mode
             result = set_image_mode(parts[1])
-            _print(f"  全局图片模型: {result.get('data', {}).get('image_mode', parts[1])}", style="green")
+            if result.get("ok"):
+                mode = result["data"]["image_mode"]
+                label = "已开启" if mode == "auto" else "已关闭自动理解"
+                _print(f"  🖼️ 图片自动理解：{label}", style="green")
+            else:
+                _print(f"  ❌ {result.get('error')}", style="red")
 
     elif cmd == "/media":
         from agent.media_api import media_api_status, process_media_queue
         target = parts[1] if len(parts) > 1 else "status"
         if target == "status":
-            _print(str(media_api_status().get("data", {})), style="dim")
+            data = media_api_status().get("data", {})
+            voice = "开启" if state.media_mode("voice") == "auto" else "关闭"
+            image = "开启" if state.media_mode("image") == "auto" else "关闭"
+            pending = data.get("pending", {})
+            _print(
+                "  📦 媒体状态\n"
+                f"  - 语音自动转写：{voice}；待处理 {pending.get('speech_to_text', 0)} 条\n"
+                f"  - 图片自动理解：{image}；待处理 {pending.get('image_understanding', 0)} 条\n"
+                "  - 手动补跑：/media voice 或 /media image",
+                style="cyan",
+            )
         elif target in ("voice", "image"):
             capability = "speech_to_text" if target == "voice" else "image_understanding"
             _print(str(process_media_queue(capability, 10).get("data", {})), style="dim")
@@ -1625,6 +1678,85 @@ def _handle_slash(command: str, config: dict, contact_name: str,
         else:
             text = global_memory.memory_text()
             _print(f"\n  🧠 用户全局记忆:\n\n{text or '(尚无全局记忆，可用 /global-memory <内容> 添加)'}")
+
+    elif cmd == "/event":
+        content = " ".join(parts[1:]) if len(parts) > 1 else ""
+        if not content:
+            _print("  用法: /event <完整叙述>  — 留存重要事件或故事", style="yellow")
+        else:
+            from agent.tools.event import record_event
+            result = record_event(
+                title=content[:40], summary=content[:200], narrative=content,
+                contact_name=contact_name,
+            )
+            if result.get("ok"):
+                _print(f"  🗂️ 已归档事件: {result['data']['title']}", style="green")
+            else:
+                _print(f"  ❌ {result.get('error')}", style="red")
+
+    elif cmd == "/events":
+        from agent.tools.event import view_events
+        keyword = " ".join(parts[1:]) if len(parts) > 1 else ""
+        result = view_events(contact_name=contact_name, keyword=keyword, limit=10)
+        items = result.get("data", {}).get("events", [])
+        if not items:
+            _print("  没有匹配的事件记录；可用 /event <完整叙述> 新建", style="yellow")
+        else:
+            _print(f"\n  🗂️ 事件/故事（{len(items)} 条）:", style="cyan")
+            for item in items:
+                _print(f"\n  [{item.get('event_time') or item.get('updated_at', '')}] {item.get('title', '')}", style="bold")
+                _print(f"    {item.get('summary', '')[:200]}", style="dim")
+
+    elif cmd == "/status":
+        from agent.tools.relationship import get_relationship_dashboard
+        data = get_relationship_dashboard(contact_name=contact_name).get("data", {})
+        _print(f"\n  📈 关系信号趋势（{data.get('contact', contact_name)}）", style="cyan")
+        for value in data.get("dimensions", {}).values():
+            if value.get("count"):
+                _print(f"  - {value['label']}：{value['state']}（{value['count']} 条信号）")
+            else:
+                _print(f"  - {value['label']}：信号不足", style="dim")
+        for alert in data.get("alerts", []):
+            _print(f"  ⚠️ {alert}", style="yellow")
+        _print("  注：这不是好感分；先看证据、情节与其他解释。", style="dim")
+
+    elif cmd == "/stats":
+        from agent.tools.analytics import get_message_statistics
+        try:
+            days = int(parts[1]) if len(parts) > 1 else 14
+        except ValueError:
+            _print("  用法: /stats [天数]，例如 /stats 14", style="yellow")
+            return
+        result = get_message_statistics(contact_name=contact_name, days=days, granularity="week")
+        if not result.get("ok"):
+            _print(f"  ❌ {result.get('error')}", style="red")
+            return
+        data, recent, previous = result["data"], result["data"]["recent"], result["data"]["previous"]
+        delta = data["delta"]
+        _print(f"\n  📊 消息趋势：近 {days} 天 vs 前 {days} 天", style="cyan")
+        _print(f"  - 消息数：{recent['message_count']}（前期 {previous['message_count']}，变化 {delta['messages']:+d}）")
+        _print(f"  - 亲昵动作 {delta['亲昵动作']:+d}；亲密表达 {delta['亲密表达']:+d}；仪式问候 {delta['仪式问候']:+d}")
+        _print(f"  - 压力/疲惫 {delta['压力/疲惫']:+d}；回避/不确定 {delta['回避/不确定']:+d}")
+        for role in ("我", "对方"):
+            item = recent["by_role"].get(role)
+            if item:
+                _print(f"  - {role}：{item['messages']} 条，均长 {item['avg_characters']} 字，短句 {item['short']}，长句 {item['long']}")
+        _print(f"  - 媒体：{recent['types']}", style="dim")
+        _print("  注：这是客观计数，需结合人物和事件链解释。", style="dim")
+
+    elif cmd == "/backfill":
+        from agent.tools.message import backfill_contact_history
+        try:
+            days = int(parts[1]) if len(parts) > 1 else 180
+        except ValueError:
+            _print("  用法: /backfill [天数]，例如 /backfill 180", style="yellow")
+            return
+        result = backfill_contact_history(contact_name, days)
+        if result.get("ok"):
+            data = result["data"]
+            _print(f"  ✅ 已补齐 {data['contact']} 近 {data['days']} 天的 {data['archived']} 条消息事实。", style="green")
+        else:
+            _print(f"  ❌ {result.get('error')}", style="red")
 
     elif cmd == "/save":
         if len(parts) < 2:

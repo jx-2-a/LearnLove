@@ -413,6 +413,81 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "record_relationship_signal",
+            "description": "记录一条可复核的关系变化信号。只能基于明确消息、事件或用户陈述；必须同时写 evidence 和 alternatives，不得把读心当事实。direction: -2/-1 下降，0 无变化，1/2 上升；communication_pressure 则正数表示压力上升。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "contact_name": {"type": "string"},
+                    "dimension": {"type": "string", "enum": ["mutuality", "emotional_safety", "repair_willingness", "closeness_investment", "communication_pressure"]},
+                    "direction": {"type": "integer", "enum": [-2, -1, 0, 1, 2]},
+                    "evidence": {"type": "array", "items": {"type": "string"}, "description": "可见原话、行为或事件事实"},
+                    "alternatives": {"type": "array", "items": {"type": "string"}, "description": "其他合理解释，如工作压力、病痛、时间安排"},
+                    "trigger_text": {"type": "string", "description": "人物、情节和触发链"},
+                    "recommended_action": {"type": "string", "description": "当前建议的验证或行动，不得一刀切"},
+                    "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+                    "observed_at": {"type": "string"},
+                    "source_message_ids": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["dimension", "direction", "evidence", "alternatives"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_relationship_dashboard",
+            "description": "查看当前联系人关系信号的趋势仪表盘、预警和原始证据。它不是好感度或对内心的结论。",
+            "parameters": {
+                "type": "object",
+                "properties": {"contact_name": {"type": "string"}, "limit": {"type": "integer"}},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_message_statistics",
+            "description": "基于完整归档消息比较相邻时间段的数量、长短文本、语音/图片/表情、亲昵/仪式/压力短语及变化。只返回客观计数，必须结合情节解释，不得用它单独推断感情。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "contact_name": {"type": "string"},
+                    "days": {"type": "integer", "description": "每个比较窗口的天数，默认 14，最大 365"},
+                    "end_time": {"type": "number", "description": "可选 Unix 时间戳，默认现在"},
+                    "granularity": {"type": "string", "enum": ["day", "week", "month"]},
+                    "include_buckets": {"type": "boolean", "description": "默认 false，只返回紧凑的前后期汇总；仅当用户明确要求逐月/逐周明细时设 true"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "backfill_contact_history",
+            "description": "把微信数据库中已有的历史消息补入 LearnLove 统一归档，用于长期统计与事实回溯。只写消息事实，不批量复制图片或语音文件。统计覆盖不足时可先调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {"contact_name": {"type": "string"}, "days": {"type": "integer", "description": "回填天数，默认 180，最大 730"}},
+                "required": ["contact_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_message_rollup",
+            "description": "获取不含聊天原文的紧凑月/周/日统计时间轴。长周期分析先用 level=auto 或 month 找拐点，再对选中的时间范围用 week/day 下钻，禁止直接读取大量原文。",
+            "parameters": {"type": "object", "properties": {
+                "contact_name": {"type": "string"}, "level": {"type": "string", "enum": ["auto", "month", "week", "day"]},
+                "start_time": {"type": "number"}, "end_time": {"type": "number"}, "limit": {"type": "integer"}}, "required": []},
+        },
+    },
     # ---- 表达翻译 ----
     {
         "type": "function",

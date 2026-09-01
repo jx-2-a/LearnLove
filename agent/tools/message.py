@@ -602,6 +602,30 @@ def get_chat_history(contact_name: str, limit: int = 30,
                "query": {"date": date, "since_ts": since_ts, "before_ts": before_ts}})
 
 
+def backfill_contact_history(contact_name: str, days: int = 180) -> dict:
+    """将历史微信消息补入统一归档，仅供统计和事实回溯，不批量归档媒体文件。"""
+    wxid, display = state.resolve_contact_exact(contact_name)
+    if not wxid:
+        return err(f"未找到联系人: {contact_name}")
+    days = max(1, min(int(days), 730))
+    since_ts = (datetime.now() - timedelta(days=days)).timestamp()
+    collected = []
+    for db_path, table_name, source_db in _find_msg_table(wxid):
+        try:
+            conn = sqlite3.connect(db_path)
+            sender_map = _get_sender_map(conn, table_name, wxid, display, db_path)
+            rows = _query_messages(conn, table_name, since_ts=since_ts)
+            conn.close()
+        except (sqlite3.Error, OSError):
+            continue
+        for row in rows:
+            collected.append(normalize_message(row, wxid, display, sender_map, source_db, table_name))
+    unique = {item["message_id"]: item for item in collected}
+    upsert_messages(list(unique.values()))
+    return ok({"contact": display, "archived": len(unique), "days": days,
+               "note": "仅补齐消息事实；图片和语音文件不会因历史统计而批量归档。"})
+
+
 def check_new_messages(contact_name: str = None) -> dict:
     """检查新消息。刷新解密后查询 since_ts 之后的消息。
 

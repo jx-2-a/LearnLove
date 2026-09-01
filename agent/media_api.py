@@ -40,12 +40,15 @@ def media_api_status() -> dict:
                         "image_understanding":"image_understanding" in _providers}})
 
 
-def process_media_queue(capability: str = "", limit: int = 10) -> dict:
-    """调用已注册处理器；未配置时只报告，不丢任务。"""
+def process_media_queue(capability: str = "", limit: int = 10,
+                        retry_failed: bool = True) -> dict:
+    """调用已注册处理器；自动模式只取新任务，手动补跑才重试失败任务。"""
     _ensure_local_providers()
     if capability and capability not in ("speech_to_text","image_understanding"):
         return err("capability 必须是 speech_to_text 或 image_understanding")
-    jobs = pending_media_jobs(capability=capability,limit=limit)
+    jobs = pending_media_jobs(
+        capability=capability, limit=limit, include_failed=retry_failed,
+    )
     completed,failed,waiting = 0,0,0
     for job in jobs:
         provider = _providers.get(job["capability"])
