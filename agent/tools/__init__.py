@@ -162,9 +162,10 @@ def _express_translate_handler(meaning: str, tone: str = "warm",
 
 
 def _view_output_handler(id: str, start: int = None, end: int = None,
-                         grep: str = None) -> dict:
+                         grep: str = None, char_offset: int = 0) -> dict:
+    """按行或字符偏移读取溢出文件的有界预览。"""
     from agent.outputs import view
-    return view(id, start=start, end=end, grep=grep)
+    return view(id, start=start, end=end, grep=grep, char_offset=char_offset)
 
 
 def _list_skills_handler() -> dict:

@@ -20,8 +20,8 @@ def search_conversation_history(keyword: str = "", contact_name: str = "",
 
 
 def read_conversation_history(entry_id: str) -> dict:
-    """读取搜索结果对应的完整单条对话。"""
-    entry = read_conversation_entry(entry_id)
+    """读取单条对话预览，限制历史超大工具记录的内存占用。"""
+    entry = read_conversation_entry(entry_id, max_content_chars=4000)
     return ok(entry) if entry else err(f"未找到对话记录: {entry_id}")
 
 

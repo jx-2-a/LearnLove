@@ -702,14 +702,15 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "view_output",
-            "description": "查看溢出缓存的完整工具输出。当工具结果出现 '…[截断: … id=L3 …]' 标记时，用此工具取回完整内容。支持分页和关键词过滤",
+            "description": "分页查看溢出缓存，每次返回最多 2000 字符。使用原 id 和返回的 next_char_offset 继续读取，不要递归读取新溢出 id。支持行范围和关键词过滤",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "id": {"type": "string", "description": "溢出输出 id，来自截断标记，如 'L3'"},
                     "start": {"type": "integer", "description": "起始行号 (1-based)，默认 1"},
                     "end": {"type": "integer", "description": "结束行号"},
-                    "grep": {"type": "string", "description": "正则过滤，返回匹配行"},
+                    "grep": {"type": "string", "description": "关键词过滤读取片段"},
+                    "char_offset": {"type": "integer", "description": "匹配范围内字符偏移，续读使用 next_char_offset，默认 0"},
                 },
                 "required": ["id"],
             },

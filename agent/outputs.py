@@ -80,7 +80,8 @@ def clip_list(items: list, limit_items: int = 20, render=str, source: str = "") 
     return result
 
 
-def view(oid: str, start: int = None, end: int = None, grep: str = None) -> dict:
+def view(oid: str, start: int = None, end: int = None, grep: str = None,
+         char_offset: int = 0) -> dict:
     """检索溢出的输出内容
 
     Args:
@@ -89,31 +90,40 @@ def view(oid: str, start: int = None, end: int = None, grep: str = None) -> dict
         end: 结束行号 (1-based, inclusive)
         grep: 过滤包含该字符串的行
     """
-    # 查找文件
-    for f in os.listdir(SPILL_DIR):
-        if oid in f:
-            filepath = os.path.join(SPILL_DIR, f)
-            with open(filepath, "r", encoding="utf-8") as fh:
-                lines = fh.readlines()
-
-            if grep:
-                lines = [l for l in lines if grep in l]
-
-            if start is not None or end is not None:
-                s = (start or 1) - 1
-                e = end if end is not None else len(lines)
-                lines = lines[s:e]
-
-            text = "".join(lines)
-            total_lines = len(text.split("\n"))
-            return {
-                "ok": True,
-                "data": {
-                    "id": oid,
-                    "lines": total_lines,
-                    "chars": len(text),
-                    "text": text,
-                },
-            }
-
-    return {"ok": False, "error": f"未找到溢出输出: {oid}"}
+    # 精确匹配 ID；有重复 ID 时选最新归档，避免 L2 匹配 L20。
+    if not re.fullmatch(r"L[0-9]+", oid):
+        return {"ok": False, "error": "无效溢出输出 ID"}
+    matches = sorted(f for f in os.listdir(SPILL_DIR) if f.endswith(f"_{oid}.txt"))
+    if not matches:
+        return {"ok": False, "error": f"未找到溢出输出: {oid}"}
+    filepath = os.path.join(SPILL_DIR, matches[-1])
+    pieces, size, line_number, truncated = [], 0, 1, False
+    skip = max(0, int(char_offset or 0))
+    initial_offset = skip
+    first = max(1, start or 1)
+    last = end if end is not None else float('inf')
+    with open(filepath, "r", encoding="utf-8") as handle:
+        while line_number <= last:
+            # 按块读取，单行巨型 JSON 也不会整块进入内存。
+            chunk = handle.readline(2048)
+            if not chunk:
+                break
+            ends_line = chunk.endswith('\n')
+            if line_number >= first and (not grep or grep in chunk):
+                removed = min(skip, len(chunk))
+                skip -= removed
+                chunk = chunk[removed:]
+                room = 2000 - size
+                pieces.append(chunk[:room])
+                size += len(chunk[:room])
+                if len(chunk) > room or size >= 2000:
+                    truncated = True
+                    break
+            if ends_line:
+                line_number += 1
+    result = "".join(pieces)
+    return {"ok": True, "data": {"id": oid, "path": filepath,
+            "lines": result.count('\n') + 1, "chars": len(result),
+            "text": result, "truncated": truncated,
+            "next_char_offset": initial_offset + size if truncated else None,
+            "note": "超长输出仅返回预览；完整内容保存在 path，可用 char_offset 分页，不再生成嵌套溢出。"}}

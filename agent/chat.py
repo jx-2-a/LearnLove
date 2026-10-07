@@ -96,7 +96,7 @@ def _save_conversation(role: str, content, contact_name: str = "", **metadata):
         session_key, sid = _conversation_identity(contact_name)
         save_conversation_entry(
             role=role,
-            content=str(content),
+            content=content,
             session_key=session_key,
             contact_name=contact_name,
             source="learnlove",
@@ -384,11 +384,16 @@ def _execute_tool_loop(messages: list[dict], llm_cfg: dict,
 
                 _save_conversation(
                     "tool",
-                    json.dumps({
+                    {
                         "name": tool_name,
                         "args": tool_args,
-                        "result": tool_result,
-                    }, ensure_ascii=False, default=str),
+                        # 账本查询结果只保存引用，避免账本内容递归写回。
+                        "result": ({"ledger_reference": tool_args,
+                                    "ok": tool_result.get("ok")}
+                                   if tool_name in {"read_conversation_history",
+                                                    "search_conversation_history", "view_output"}
+                                   else tool_result),
+                    },
                     state.active_contact_name,
                     channel="tool",
                     tool_name=tool_name,
@@ -407,7 +412,7 @@ def _execute_tool_loop(messages: list[dict], llm_cfg: dict,
 
                 # 格式化结果
                 result_text = json.dumps(tool_result, ensure_ascii=False)
-                if len(result_text) > 4000:
+                if len(result_text) > 4000 and tool_name != "view_output":
                     from agent.outputs import spill
                     info = spill(result_text, source=tool_name)
                     result_text = (

@@ -3,11 +3,25 @@
 import hashlib
 import json
 import os
+import sqlite3
 import uuid
 from datetime import datetime
 from pathlib import Path
 
 from agent.archive import connect
+from agent.ledger_payload import safe_payload, prepare_fields, byte_size, configure_size_logging, LOG
+
+
+LEDGER_COLUMNS = (
+    "entry_id", "session_key", "contact_name", "role", "content", "source",
+    "source_sid", "source_event_id", "sequence", "metadata_json", "created_at",
+)
+
+
+def _bounded_projection():
+    """让 SQLite 直接返回正文预览，避免把历史巨型工具记录载入内存。"""
+    return ','.join('substr(content,1,?) AS content' if c == 'content' else c
+                    for c in LEDGER_COLUMNS)
 
 
 def _now() -> str:
@@ -20,8 +34,12 @@ def save_conversation_entry(role: str, content: str, session_key: str = "",
                             source_sid: str = "", source_event_id: str = "",
                             sequence: int = 0, metadata: dict | None = None,
                             created_at: str = "") -> dict:
-    """幂等追加一条完整对话记录；有来源事件 ID 时重复导入不会复制。"""
-    content = "" if content is None else str(content)
+    """幂等追加对话记录；超大内容保存安全摘要；有来源事件 ID 时重复导入不会复制。"""
+    original_content_bytes = byte_size(content)
+    original_metadata_bytes = byte_size(metadata or {})
+    content = "" if content is None else safe_payload(content)
+    if not isinstance(content, str):
+        content = json.dumps(content, ensure_ascii=False, default=str)
     if not role or not content:
         return {"entry_id": "", "inserted": False}
     if source_event_id:
@@ -30,14 +48,21 @@ def save_conversation_entry(role: str, content: str, session_key: str = "",
     else:
         entry_id = "conv_" + uuid.uuid4().hex
     with connect() as conn:
+        configure_size_logging(conn.execute("PRAGMA database_list").fetchone()[2])
+        LOG.info("conversation ledger raw payload_bytes content=%s metadata=%s",
+                 original_content_bytes, original_metadata_bytes)
+        fields = dict(
+            entry_id=entry_id, session_key=session_key, contact_name=contact_name,
+            role=role, content=content, source=source, source_sid=source_sid,
+            source_event_id=source_event_id, sequence=int(sequence or 0),
+            metadata_json=json.dumps(safe_payload(metadata or {}, budget=16384),
+                                     ensure_ascii=False, default=str),
+            created_at=created_at or _now(),
+        )
+        fields = prepare_fields(fields, conn.getlimit(sqlite3.SQLITE_LIMIT_LENGTH))
         cursor = conn.execute(
-            """INSERT OR IGNORE INTO conversation_entries
-               (entry_id,session_key,contact_name,role,content,source,source_sid,
-                source_event_id,sequence,metadata_json,created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-            (entry_id, session_key, contact_name, role, content, source, source_sid,
-             source_event_id, int(sequence or 0),
-             json.dumps(metadata or {}, ensure_ascii=False), created_at or _now()),
+            f"INSERT OR IGNORE INTO conversation_entries ({','.join(fields)}) "
+            f"VALUES ({','.join('?' for _ in fields)})", tuple(fields.values()),
         )
     return {"entry_id": entry_id, "inserted": cursor.rowcount > 0}
 
@@ -69,8 +94,8 @@ def search_conversations(keyword: str = "", contact_name: str = "",
     ])
     with connect() as conn:
         rows = conn.execute(
-            f"SELECT * FROM conversation_entries WHERE {' AND '.join(where)} "
-            "ORDER BY rowid DESC LIMIT ? OFFSET ?", params,
+            f"SELECT {_bounded_projection()} FROM conversation_entries WHERE {' AND '.join(where)} "
+            "ORDER BY rowid DESC LIMIT ? OFFSET ?", [max_content_chars + 1, *params],
         ).fetchall()
     result = []
     for row in rows:
@@ -83,15 +108,24 @@ def search_conversations(keyword: str = "", contact_name: str = "",
     return result
 
 
-def read_conversation_entry(entry_id: str) -> dict | None:
+def read_conversation_entry(entry_id: str, max_content_chars: int | None = None) -> dict | None:
     """按稳定 entry_id 读取一条未裁剪的完整记录。"""
     with connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM conversation_entries WHERE entry_id=?", (entry_id,),
-        ).fetchone()
+        if max_content_chars is None:
+            row = conn.execute(
+                "SELECT * FROM conversation_entries WHERE entry_id=?", (entry_id,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                f"SELECT {_bounded_projection()},length(content) AS content_chars "
+                "FROM conversation_entries WHERE entry_id=?",
+                (max_content_chars, entry_id),
+            ).fetchone()
     if not row:
         return None
     item = dict(row)
+    if max_content_chars is not None:
+        item["truncated"] = item["content_chars"] > max_content_chars
     item["metadata"] = json.loads(item.pop("metadata_json") or "{}")
     return item
 
